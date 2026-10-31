@@ -137,7 +137,7 @@ object DiscountEngine {
                 val rawName = item.optString("name", "کالای کد $id")
                 val categoryName = item.optJSONObject("category")?.optString("name", "سایر") ?: "سایر"
                 val brandName = item.optJSONObject("brand")?.optString("name", "") ?: ""
-                val fullName = "[$categoryName]$rawName"
+                val fullName = "[$categoryName] $rawName"
 
                 val newDiscount = extractDiscount(item)
                 val newPrice = item.optLong("unitDiscountedPrice", item.optLong("boxDiscountedPrice", 0L))
@@ -204,7 +204,7 @@ object DiscountEngine {
                             put("isBetter", isDiscountIncreased)
                         }
                         newlyDetectedRecords.add(changeRecord)
-                        notificationLines.add("$badge | $fullName: از $oldDiscount% به $newDiscount\% (${numFormat.format(newPrice)} ریال)")
+                        notificationLines.add("$badge | $fullName: از $oldDiscount% به $newDiscount% (${numFormat.format(newPrice)} ریال)")
                     }
                 } else if (!isFirstRun) {
                     newProductsCount++
@@ -220,7 +220,7 @@ object DiscountEngine {
                         put("isBetter", true)
                     }
                     newlyDetectedRecords.add(newProductRecord)
-                    notificationLines.add("🆕 کالای جدید: $fullName (تخفیف: $newDiscount\% \vert{} خرید: ${numFormat.format(newPrice)} ریال)")
+                    notificationLines.add("🆕 کالای جدید: $fullName (تخفیف: $newDiscount% | خرید: ${numFormat.format(newPrice)} ریال)")
                 }
             }
 
