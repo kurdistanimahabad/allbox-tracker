@@ -47,7 +47,7 @@ object DiscountEngine {
                 for (i in 0 until items.length()) {
                     val item = items.optJSONObject(i) ?: continue
                     val id = item.optInt("id", -1)
-                    if (id != -1) {
+                    if (id != -1 && !collectedMap.containsKey(id)) {
                         collectedMap[id] = item
                         val catObj = item.optJSONObject("category")
                         if (catObj != null) {
@@ -60,7 +60,7 @@ object DiscountEngine {
                 }
             }
 
-            // ۱. بررسی اولیه وضعیت لاگین و دریافت صفحه عمومی
+            // ۱. دریافت لیست اصلی (که به صورت پیش‌فرض بر اساس محبوب‌ترین‌های سایت چیده شده است)
             onProgress?.invoke("⏳ در حال اتصال به سرور آل‌باکس...")
             val initialItems = fetchAllPagesForQuery("", combinedCookies) {
                 onProgress?.invoke("⏳ دریافت لیست عمومی... (${collectedMap.size} کالا)")
@@ -73,7 +73,7 @@ object DiscountEngine {
             }
             addProductsFromList(initialItems)
 
-            // ۲. اسکن کامل تمام دسته‌بندی‌های اصلی سایت (به صورت دسته‌های موازی برای سرعت بالا)
+            // ۲. اسکن کامل تمام دسته‌بندی‌های اصلی سایت
             val mainCategoryIds = (1..60).toList()
             val scannedCategories = mutableSetOf<Int>()
 
@@ -92,7 +92,7 @@ object DiscountEngine {
                     onProgress?.invoke("⏳ در حال اسکن دسته‌بندی‌ها... (${collectedMap.size} کالا پیدا شد)")
                 }
 
-                // ۳. اسکن زیرمجموعه‌های کشف‌شده که احیاناً خارج از بازه ۱ تا ۶۰ بوده‌اند
+                // ۳. اسکن زیرمجموعه‌های کشف‌شده
                 val remainingSubCats = discoveredSubCategories.filter { it !in scannedCategories }
                 for (chunk in remainingSubCats.chunked(6)) {
                     val deferredList = chunk.map { subCatId ->
@@ -113,7 +113,7 @@ object DiscountEngine {
                 return@withContext Pair(false, "هیچ محصولی دریافت نشد. ابتدا از تب «ورود» وارد حساب خود شوید.")
             }
 
-            // ۴. مقایسه با اطلاعات قبلی و ثبت تغییرات (افزایش تخفیف، کاهش تخفیف، کالای جدید)
+            // ۴. مقایسه با اطلاعات قبلی و ثبت تغییرات
             val snapshotFile = File(context.filesDir, "products_snapshot.json")
             val oldSnapshot = if (snapshotFile.exists()) JSONObject(snapshotFile.readText()) else JSONObject()
             val isFirstRun = oldSnapshot.length() == 0
@@ -130,19 +130,22 @@ object DiscountEngine {
             var newProductsCount = 0
             var discountUpCount = 0
             var discountDownCount = 0
+            var popularityRank = 1
 
             for ((idInt, item) in collectedMap) {
                 val id = idInt.toString()
                 val rawName = item.optString("name", "کالای کد $id")
                 val categoryName = item.optJSONObject("category")?.optString("name", "سایر") ?: "سایر"
                 val brandName = item.optJSONObject("brand")?.optString("name", "") ?: ""
-                val fullName = "[$categoryName] $rawName"
+                val fullName = "[$categoryName]$rawName"
 
                 val newDiscount = extractDiscount(item)
                 val newPrice = item.optLong("unitDiscountedPrice", item.optLong("boxDiscountedPrice", 0L))
                 val retailPrice = item.optLong("unitRetailPrice", item.optLong("boxRetailPrice", 0L))
                 val stock = item.optInt("purchasableQuantity", 0)
                 val unitInBox = item.optInt("unitInBox", 1)
+                val isPromoted = item.optBoolean("isPromoted", false)
+                val salesScore = item.optInt("salesCount", item.optInt("orderCount", item.optInt("popularity", 0)))
 
                 val prodObj = JSONObject().apply {
                     put("id", idInt)
@@ -155,6 +158,9 @@ object DiscountEngine {
                     put("retailPrice", retailPrice)
                     put("stock", stock)
                     put("unitInBox", unitInBox)
+                    put("isPromoted", isPromoted)
+                    put("salesScore", salesScore)
+                    put("rank", popularityRank++)
                 }
                 newSnapshot.put(id, prodObj)
 
@@ -163,7 +169,6 @@ object DiscountEngine {
                     val oldDiscount = oldProd.optInt("discount", 0)
                     val oldPrice = oldProd.optLong("price", 0L)
 
-                    // بررسی تغییر درصد تخفیف (هم افزایش و هم کاهش) یا تغییر قیمت
                     if (oldDiscount != newDiscount || oldPrice != newPrice) {
                         val isDiscountIncreased = newDiscount > oldDiscount || (newDiscount == oldDiscount && newPrice < oldPrice)
 
@@ -199,7 +204,7 @@ object DiscountEngine {
                             put("isBetter", isDiscountIncreased)
                         }
                         newlyDetectedRecords.add(changeRecord)
-                        notificationLines.add("$badge | $fullName: از $oldDiscount% به $newDiscount% (${numFormat.format(newPrice)} ریال)")
+                        notificationLines.add("$badge | $fullName: از $oldDiscount% به $newDiscount\% (${numFormat.format(newPrice)} ریال)")
                     }
                 } else if (!isFirstRun) {
                     newProductsCount++
@@ -215,7 +220,7 @@ object DiscountEngine {
                         put("isBetter", true)
                     }
                     newlyDetectedRecords.add(newProductRecord)
-                    notificationLines.add("🆕 کالای جدید: $fullName (تخفیف: $newDiscount% | خرید: ${numFormat.format(newPrice)} ریال)")
+                    notificationLines.add("🆕 کالای جدید: $fullName (تخفیف: $newDiscount\% \vert{} خرید: ${numFormat.format(newPrice)} ریال)")
                 }
             }
 
@@ -266,7 +271,6 @@ object DiscountEngine {
         return 0
     }
 
-    // دریافت تمام صفحات یک درخواست با پشتیبانی از page و offset
     private fun fetchAllPagesForQuery(
         extraQuery: String,
         cookies: String,
@@ -275,12 +279,11 @@ object DiscountEngine {
         val all = JSONArray()
         val seenInQuery = mutableSetOf<Int>()
 
-        // ابتدا تلاش با limit=100 و در صورت محدودیت سرور، limit=50
         val firstUrl100 = "$BASE_URL?limit=100&latitude=$LAT&longitude=$LNG$extraQuery"
         var firstPage = fetchSingleUrl(firstUrl100, cookies)
         var limitUsed = 100
 
-        if (firstPage == null) return null // 401 or 403 Unauthorized
+        if (firstPage == null) return null
 
         if (firstPage.length() == 0) {
             val firstUrl50 = "$BASE_URL?limit=50&latitude=$LAT&longitude=$LNG$extraQuery"
@@ -295,10 +298,8 @@ object DiscountEngine {
         }
         onPageFetched?.invoke()
 
-        // اگر تعداد آیتم‌های صفحه اول کمتر از۲۰ بود، یعنی صفحه دیگری ندارد
         if (firstPage.length() < 20) return all
 
-        // پیمایش صفحات بعدی (ابتدا با پارامتر page و در صورت عدم تغییر با پارامتر offset)
         var page = 2
         var useOffsetMode = false
 
@@ -325,7 +326,6 @@ object DiscountEngine {
 
             if (addedNew == 0) {
                 if (!useOffsetMode) {
-                    // اگر سرور پارامتر page را نادیده گرفت، با offset امتحان کن
                     useOffsetMode = true
                     continue
                 } else {
