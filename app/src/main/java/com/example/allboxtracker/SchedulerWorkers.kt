@@ -5,12 +5,15 @@ import android.app.PendingIntent
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.os.PowerManager
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
-import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.util.Calendar
 import java.util.concurrent.TimeUnit
 
@@ -23,12 +26,11 @@ class DiscountWorker(val context: Context, params: WorkerParameters) : Coroutine
 
 class ExactTimeReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        val work = OneTimeWorkRequestBuilder<DiscountWorker>().build()
-        WorkManager.getInstance(context).enqueue(work)
-
         val alarmType = intent.getStringExtra("ALARM_TYPE") ?: "DAILY"
+        val prefs = context.getSharedPreferences("AllBoxPrefs", Context.MODE_PRIVATE)
+
+        // ۱. تنظیم مجدد آلارم بعدی بلافاصله
         if (alarmType == "INTERVAL") {
-            val prefs = context.getSharedPreferences("AllBoxPrefs", Context.MODE_PRIVATE)
             if (prefs.getBoolean("AUTO_CHECK_ENABLED", true)) {
                 val intervalMin = prefs.getInt("AUTO_INTERVAL_MINUTES", 30)
                 AlarmHelper.scheduleIntervalAlarm(context, intervalMin)
@@ -40,12 +42,57 @@ class ExactTimeReceiver : BroadcastReceiver() {
                 AlarmHelper.scheduleDailyAlarm(context, hour, minute)
             }
         }
+
+        // ۲. اجرای مستقیم و فوری بررسی قیمت‌ها بدون معطل ماندن در صف WorkManager
+        val pendingResult = goAsync()
+        val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
+        val wakeLock = powerManager.newWakeLock(
+            PowerManager.PARTIAL_WAKE_LOCK,
+            "AllBoxTracker::BgCheckWakeLock"
+        )
+        wakeLock.acquire(3 * 60 * 1000L) // بیدار نگه داشتن پردازنده حداکثر تا ۳ دقیقه
+
+        CoroutineScope(Dispatchers.IO).launch {
+            try {
+                DiscountEngine.checkPricesNow(context, isManual = false)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            } finally {
+                if (wakeLock.isHeld) wakeLock.release()
+                pendingResult.finish()
+            }
+        }
+    }
+}
+
+// راه‌اندازی مجدد تمام تایمرها پس از خاموش و روشن شدن گوشی
+class BootReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
+            AlarmHelper.restoreAllSchedules(context)
+        }
     }
 }
 
 object AlarmHelper {
 
-    // تنظیم بازه زمانی دلخواه برای بررسی خودکار (مثلاً هر ۱۵، ۳۰، ۶۰ دقیقه و...)
+    fun restoreAllSchedules(context: Context) {
+        val prefs = context.getSharedPreferences("AllBoxPrefs", Context.MODE_PRIVATE)
+        val enabled = prefs.getBoolean("AUTO_CHECK_ENABLED", true)
+        val intervalMin = prefs.getInt("AUTO_INTERVAL_MINUTES", 30)
+        updatePeriodicSchedule(context, enabled, intervalMin)
+
+        val savedTimes = prefs.getStringSet("CUSTOM_TIMES", emptySet()) ?: emptySet()
+        for (timeStr in savedTimes) {
+            val parts = timeStr.split(":")
+            if (parts.size == 2) {
+                val h = parts[0].toIntOrNull() ?: continue
+                val m = parts[1].toIntOrNull() ?: continue
+                scheduleDailyAlarm(context, h, m)
+            }
+        }
+    }
+
     fun updatePeriodicSchedule(context: Context, enabled: Boolean, intervalMinutes: Int) {
         val safeMinutes = maxOf(5, intervalMinutes)
         if (!enabled) {
@@ -54,7 +101,6 @@ object AlarmHelper {
             return
         }
 
-        // ۱. تنظیم در WorkManager اندروید (حداقل استاندارد ۱۵ دقیقه)
         val wmMinutes = maxOf(15L, safeMinutes.toLong())
         val work = PeriodicWorkRequestBuilder<DiscountWorker>(wmMinutes, TimeUnit.MINUTES).build()
         WorkManager.getInstance(context).enqueueUniquePeriodicWork(
@@ -63,7 +109,6 @@ object AlarmHelper {
             work
         )
 
-        // ۲. تنظیم آلارم دقیق کمکی برای اجرای دقیق در دقیقه تعیین شده توسط کاربر
         scheduleIntervalAlarm(context, safeMinutes)
     }
 
@@ -77,11 +122,7 @@ object AlarmHelper {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         val triggerAt = System.currentTimeMillis() + (intervalMinutes * 60 * 1000L)
-        try {
-            alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
-        } catch (e: SecurityException) {
-            alarmManager.set(AlarmManager.RTC_WAKEUP, triggerAt, pendingIntent)
-        }
+        setHighPriorityAlarm(context, alarmManager, triggerAt, pendingIntent)
     }
 
     private fun cancelIntervalAlarm(context: Context) {
@@ -111,20 +152,13 @@ object AlarmHelper {
             set(Calendar.HOUR_OF_DAY, hour)
             set(Calendar.MINUTE, minute)
             set(Calendar.SECOND, 0)
-            if (before(Calendar.getInstance())) {
+            set(Calendar.MILLISECOND, 0)
+            if (timeInMillis <= System.currentTimeMillis()) {
                 add(Calendar.DAY_OF_YEAR, 1)
             }
         }
 
-        try {
-            alarmManager.setExactAndAllowWhileIdle(
-                AlarmManager.RTC_WAKEUP,
-                calendar.timeInMillis,
-                pendingIntent
-            )
-        } catch (e: SecurityException) {
-            alarmManager.set(AlarmManager.RTC_WAKEUP, calendar.timeInMillis, pendingIntent)
-        }
+        setHighPriorityAlarm(context, alarmManager, calendar.timeInMillis, pendingIntent)
     }
 
     fun cancelDailyAlarm(context: Context, hour: Int, minute: Int) {
@@ -136,5 +170,29 @@ object AlarmHelper {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
         alarmManager.cancel(pendingIntent)
+    }
+
+    // استفاده از AlarmClock برای جلوگیری ۱۰۰٪ از توقف تایمر در حالت استندبای و Doze اندروید
+    private fun setHighPriorityAlarm(
+        context: Context,
+        alarmManager: AlarmManager,
+        triggerAtMillis: Long,
+        operation: PendingIntent
+    ) {
+        try {
+            val showIntent = Intent(context, MainActivity::class.java)
+            val showPending = PendingIntent.getActivity(
+                context, 0, showIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+            val clockInfo = AlarmManager.AlarmClockInfo(triggerAtMillis, showPending)
+            alarmManager.setAlarmClock(clockInfo, operation)
+        } catch (e: Exception) {
+            try {
+                alarmManager.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMillis, operation)
+            } catch (_: Exception) {
+                alarmManager.set(AlarmManager.RTC_WAKEUP, triggerAtMillis, operation)
+            }
+        }
     }
 }
