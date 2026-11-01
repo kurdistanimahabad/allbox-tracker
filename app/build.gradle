@@ -11,8 +11,28 @@ android {
         applicationId "com.example.allboxtracker"
         minSdk 24
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        // افزایش خودکار کد نسخه در هر بار ساخت برای نصب مستقیم آپدیت روی نسخه قبلی
+        def runNum = System.getenv("GITHUB_RUN_NUMBER")
+        versionCode runNum ? runNum.toInteger() + 10 : 10
+        versionName "1.${versionCode}"
+    }
+
+    signingConfigs {
+        debug {
+            def ksFile = file("allbox-key.jks")
+            if (ksFile.exists()) {
+                storeFile ksFile
+                storePassword "allboxpass"
+                keyAlias "allboxkey"
+                keyPassword "allboxpass"
+            }
+        }
+    }
+
+    buildTypes {
+        debug {
+            signingConfig signingConfigs.debug
+        }
     }
 
     compileOptions {
