@@ -25,8 +25,29 @@ import java.util.Locale
 object DiscountEngine {
 
     private const val BASE_URL = "https://api-allbox.surenamarkets.com/listing/products"
+    private const val CATEGORIES_URL_1 = "https://api-allbox.surenamarkets.com/listing/categories"
+    private const val CATEGORIES_URL_2 = "https://api-allbox.surenamarkets.com/categories"
     private const val LAT = "36.774354703804"
     private const val LNG = "45.747235942022"
+
+    // ذخیره کوکی در حافظه دائم تا در پس‌زمینه هم در دسترس باشد
+    fun syncAndGetCookies(context: Context): String {
+        val prefs = context.getSharedPreferences("AllBoxPrefs", Context.MODE_PRIVATE)
+        var liveCookies = ""
+        try {
+            val cookieManager = CookieManager.getInstance()
+            val apiCookies = cookieManager.getCookie("https://api-allbox.surenamarkets.com") ?: ""
+            val mainCookies = cookieManager.getCookie("https://allbox.surenamarkets.com") ?: ""
+            liveCookies = listOf(apiCookies, mainCookies).filter { it.isNotEmpty() }.joinToString("; ")
+        } catch (_: Exception) {
+        }
+
+        if (liveCookies.contains("jptrsessid") || liveCookies.isNotEmpty()) {
+            prefs.edit().putString("SAVED_COOKIES", liveCookies).apply()
+            return liveCookies
+        }
+        return prefs.getString("SAVED_COOKIES", "") ?: ""
+    }
 
     suspend fun checkPricesNow(
         context: Context,
@@ -34,14 +55,15 @@ object DiscountEngine {
         onProgress: ((String) -> Unit)? = null
     ): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         try {
-            val cookieManager = CookieManager.getInstance()
-            val apiCookies = cookieManager.getCookie("https://api-allbox.surenamarkets.com") ?: ""
-            val mainCookies = cookieManager.getCookie("https://allbox.surenamarkets.com") ?: ""
-            val combinedCookies = listOf(apiCookies, mainCookies).filter { it.isNotEmpty() }.joinToString("; ")
-
+            val combinedCookies = syncAndGetCookies(context)
             val prefs = context.getSharedPreferences("AllBoxPrefs", Context.MODE_PRIVATE)
+
             val collectedMap = Collections.synchronizedMap(LinkedHashMap<Int, JSONObject>())
             val discoveredSubCategories = Collections.synchronizedSet(mutableSetOf<Int>())
+            val categoryNamesMap = Collections.synchronizedMap(mutableMapOf<Int, String>())
+
+            // تلاش برای دریافت لیست رسمی دسته‌بندی‌های اصلی از سرور
+            fetchServerCategories(combinedCookies, categoryNamesMap)
 
             fun addProductsFromList(items: JSONArray) {
                 for (i in 0 until items.length()) {
@@ -52,7 +74,19 @@ object DiscountEngine {
                         val catObj = item.optJSONObject("category")
                         if (catObj != null) {
                             val subId = catObj.optInt("id", -1)
-                            val parentId = catObj.optInt("parentId", -1)
+                            val subName = catObj.optString("name", "")
+                            if (subId > 0 && subName.isNotEmpty()) {
+                                categoryNamesMap[subId] = subName
+                            }
+                            val parentObj = catObj.optJSONObject("parent")
+                            if (parentObj != null) {
+                                val pId = parentObj.optInt("id", -1)
+                                val pName = parentObj.optString("name", "")
+                                if (pId > 0 && pName.isNotEmpty()) {
+                                    categoryNamesMap[pId] = pName
+                                }
+                            }
+                            val parentId = if (catObj.isNull("parentId")) 0 else catObj.optInt("parentId", 0)
                             if (subId > 0) discoveredSubCategories.add(subId)
                             if (parentId > 0) discoveredSubCategories.add(parentId)
                         }
@@ -60,7 +94,6 @@ object DiscountEngine {
                 }
             }
 
-            // ۱. دریافت لیست اصلی (که به صورت پیش‌فرض بر اساس محبوب‌ترین‌های سایت چیده شده است)
             onProgress?.invoke("⏳ در حال اتصال به سرور آل‌باکس...")
             val initialItems = fetchAllPagesForQuery("", combinedCookies) {
                 onProgress?.invoke("⏳ دریافت لیست عمومی... (${collectedMap.size} کالا)")
@@ -73,7 +106,7 @@ object DiscountEngine {
             }
             addProductsFromList(initialItems)
 
-            // ۲. اسکن کامل تمام دسته‌بندی‌های اصلی سایت
+            // اسکن دسته‌بندی‌های اصلی و زیرمجموعه‌ها
             val mainCategoryIds = (1..60).toList()
             val scannedCategories = mutableSetOf<Int>()
 
@@ -89,10 +122,9 @@ object DiscountEngine {
                     results.forEach { arr ->
                         if (arr != null) addProductsFromList(arr)
                     }
-                    onProgress?.invoke("⏳ در حال اسکن دسته‌بندی‌ها... (${collectedMap.size} کالا پیدا شد)")
+                    onProgress?.invoke("⏳ اسکن دسته‌بندی‌ها... (${collectedMap.size} کالا پیدا شد)")
                 }
 
-                // ۳. اسکن زیرمجموعه‌های کشف‌شده
                 val remainingSubCats = discoveredSubCategories.filter { it !in scannedCategories }
                 for (chunk in remainingSubCats.chunked(6)) {
                     val deferredList = chunk.map { subCatId ->
@@ -113,7 +145,17 @@ object DiscountEngine {
                 return@withContext Pair(false, "هیچ محصولی دریافت نشد. ابتدا از تب «ورود» وارد حساب خود شوید.")
             }
 
-            // ۴. مقایسه با اطلاعات قبلی و ثبت تغییرات
+            // گروه‌بندی زیردسته‌ها برای تشخیص نام دسته‌بندی‌های اصلی
+            val parentToSubNames = mutableMapOf<Int, MutableSet<String>>()
+            for ((_, item) in collectedMap) {
+                val catObj = item.optJSONObject("category") ?: continue
+                val subName = catObj.optString("name", "سایر")
+                val parentId = if (catObj.isNull("parentId")) 0 else catObj.optInt("parentId", 0)
+                if (parentId > 0) {
+                    parentToSubNames.getOrPut(parentId) { mutableSetOf() }.add(subName)
+                }
+            }
+
             val snapshotFile = File(context.filesDir, "products_snapshot.json")
             val oldSnapshot = if (snapshotFile.exists()) JSONObject(snapshotFile.readText()) else JSONObject()
             val isFirstRun = oldSnapshot.length() == 0
@@ -135,13 +177,23 @@ object DiscountEngine {
             for ((idInt, item) in collectedMap) {
                 val id = idInt.toString()
                 val rawName = item.optString("name", "کالای کد $id")
-                val categoryName = item.optJSONObject("category")?.optString("name", "سایر") ?: "سایر"
+                val catObj = item.optJSONObject("category")
+                val subCategoryName = catObj?.optString("name", "سایر") ?: "سایر"
+                val parentId = if (catObj == null || catObj.isNull("parentId")) 0 else catObj.optInt("parentId", 0)
+
+                val mainCategoryName = resolveMainCategoryName(
+                    parentId = parentId,
+                    subCategoryName = subCategoryName,
+                    categoryNamesMap = categoryNamesMap,
+                    subNamesInGroup = parentToSubNames[parentId] ?: emptySet()
+                )
+
                 val brandName = item.optJSONObject("brand")?.optString("name", "") ?: ""
-                val fullName = "[$categoryName] $rawName"
+                val fullName = "[$subCategoryName] $rawName"
 
                 val newDiscount = extractDiscount(item)
                 val newPrice = item.optLong("unitDiscountedPrice", item.optLong("boxDiscountedPrice", 0L))
-                val retailPrice = item.optLong("unitRetailPrice", item.optLong("boxRetailPrice", 0L))
+                val newRetailPrice = item.optLong("unitRetailPrice", item.optLong("boxRetailPrice", 0L))
                 val stock = item.optInt("purchasableQuantity", 0)
                 val unitInBox = item.optInt("unitInBox", 1)
                 val isPromoted = item.optBoolean("isPromoted", false)
@@ -151,11 +203,13 @@ object DiscountEngine {
                     put("id", idInt)
                     put("rawName", rawName)
                     put("name", fullName)
-                    put("category", categoryName)
+                    put("mainCategory", mainCategoryName)
+                    put("category", subCategoryName)
+                    put("parentId", parentId)
                     put("brand", brandName)
                     put("discount", newDiscount)
                     put("price", newPrice)
-                    put("retailPrice", retailPrice)
+                    put("retailPrice", newRetailPrice)
                     put("stock", stock)
                     put("unitInBox", unitInBox)
                     put("isPromoted", isPromoted)
@@ -168,8 +222,9 @@ object DiscountEngine {
                     val oldProd = oldSnapshot.getJSONObject(id)
                     val oldDiscount = oldProd.optInt("discount", 0)
                     val oldPrice = oldProd.optLong("price", 0L)
+                    val oldRetailPrice = oldProd.optLong("retailPrice", newRetailPrice)
 
-                    if (oldDiscount != newDiscount || oldPrice != newPrice) {
+                    if (oldDiscount != newDiscount || oldPrice != newPrice || oldRetailPrice != newRetailPrice) {
                         val isDiscountIncreased = newDiscount > oldDiscount || (newDiscount == oldDiscount && newPrice < oldPrice)
 
                         val changeType: String
@@ -189,38 +244,48 @@ object DiscountEngine {
                         } else {
                             discountDownCount++
                             changeType = "DISCOUNT_DOWN"
-                            badge = "🔴 افزایش قیمت خرید"
+                            badge = "🔴 افزایش قیمت"
                         }
 
                         val changeRecord = JSONObject().apply {
                             put("type", changeType)
                             put("name", fullName)
-                            put("category", categoryName)
+                            put("mainCategory", mainCategoryName)
+                            put("category", subCategoryName)
                             put("oldDiscount", oldDiscount)
                             put("newDiscount", newDiscount)
                             put("oldPrice", oldPrice)
                             put("newPrice", newPrice)
+                            put("oldRetailPrice", oldRetailPrice)
+                            put("newRetailPrice", newRetailPrice)
                             put("time", currentTime)
                             put("isBetter", isDiscountIncreased)
                         }
                         newlyDetectedRecords.add(changeRecord)
-                        notificationLines.add("$badge | $fullName: از $oldDiscount% به $newDiscount% (${numFormat.format(newPrice)} ریال)")
+                        notificationLines.add(
+                            "$badge | $fullName: تخفیف از $oldDiscount% به $newDiscount% | خرید: ${numFormat.format(newPrice)} | مصرف‌کننده: ${numFormat.format(newRetailPrice)} ریال"
+                        )
                     }
                 } else if (!isFirstRun) {
                     newProductsCount++
                     val newProductRecord = JSONObject().apply {
                         put("type", "NEW_PRODUCT")
                         put("name", fullName)
-                        put("category", categoryName)
+                        put("mainCategory", mainCategoryName)
+                        put("category", subCategoryName)
                         put("oldDiscount", 0)
                         put("newDiscount", newDiscount)
-                        put("oldPrice", retailPrice)
+                        put("oldPrice", newRetailPrice)
                         put("newPrice", newPrice)
+                        put("oldRetailPrice", newRetailPrice)
+                        put("newRetailPrice", newRetailPrice)
                         put("time", currentTime)
                         put("isBetter", true)
                     }
                     newlyDetectedRecords.add(newProductRecord)
-                    notificationLines.add("🆕 کالای جدید: $fullName (تخفیف: $newDiscount% | خرید: ${numFormat.format(newPrice)} ریال)")
+                    notificationLines.add(
+                        "🆕 کالای جدید: $fullName (تخفیف: $newDiscount% | خرید: ${numFormat.format(newPrice)} | مصرف‌کننده: ${numFormat.format(newRetailPrice)} ریال)"
+                    )
                 }
             }
 
@@ -228,7 +293,7 @@ object DiscountEngine {
             prefs.edit().putString("LAST_CHECK_TIME", "$currentTime (${newSnapshot.length()} کالا)").apply()
 
             if (isFirstRun) {
-                return@withContext Pair(true, "لیست کامل شامل ${newSnapshot.length()} کالا ذخیره شد! اکنون می‌توانید همه کالاها را در تب «همه محصولات» ببینید.")
+                return@withContext Pair(true, "لیست کامل شامل ${newSnapshot.length()} کالا ذخیره شد!")
             }
 
             if (newlyDetectedRecords.isNotEmpty()) {
@@ -248,7 +313,7 @@ object DiscountEngine {
                 sendNotification(
                     context,
                     "🔔 تغییرات آل‌باکس: $summaryText",
-                    notificationLines.take(12).joinToString("\n")
+                    notificationLines.take(10).joinToString("\n")
                 )
                 return@withContext Pair(true, "بروزرسانی انجام شد (${newSnapshot.length()} کالا): $summaryText ثبت شد.")
             }
@@ -257,6 +322,81 @@ object DiscountEngine {
         } catch (e: Exception) {
             e.printStackTrace()
             return@withContext Pair(false, "خطا در ارتباط با سرور: ${e.localizedMessage}")
+        }
+    }
+
+    // تشخیص نام دسته‌بندی اصلی (از سرور یا بر اساس زیرمجموعه‌های آن)
+    private fun resolveMainCategoryName(
+        parentId: Int,
+        subCategoryName: String,
+        categoryNamesMap: Map<Int, String>,
+        subNamesInGroup: Set<String>
+    ): String {
+        if (parentId <= 0) return subCategoryName
+        categoryNamesMap[parentId]?.let { if (it.isNotEmpty()) return it }
+
+        val joined = subNamesInGroup.joinToString(" ")
+        return when {
+            joined.contains("روغن") || joined.contains("برنج") || joined.contains("ماکارونی") || joined.contains("رب") || joined.contains("حبوبات") || joined.contains("قند") || joined.contains("شکر") -> "خواروبار و نان"
+            joined.contains("شیر") || joined.contains("پنیر") || joined.contains("ماست") || joined.contains("کره") || joined.contains("خامه") || joined.contains("دوغ") -> "لبنیات و بستنی"
+            joined.contains("نوشابه") || joined.contains("آبمیوه") || joined.contains("چای") || joined.contains("قهوه") || joined.contains("آب معدنی") || joined.contains("شربت") -> "نوشیدنی و چای"
+            joined.contains("مایع") || joined.contains("پودر") || joined.contains("دستمال") || joined.contains("شامپو") || joined.contains("صابون") || joined.contains("سفید کننده") || joined.contains("شوینده") -> "شوینده و بهداشتی"
+            joined.contains("کیک") || joined.contains("بیسکویت") || joined.contains("شکلات") || joined.contains("چیپس") || joined.contains("پفک") || joined.contains("آدامس") || joined.contains("ویفر") -> "تنقلات و شیرینی‌جات"
+            joined.contains("سوسیس") || joined.contains("کالباس") || joined.contains("مرغ") || joined.contains("گوشت") || joined.contains("تخم مرغ") || joined.contains("همبرگر") -> "پروتئینی و گوشتی"
+            joined.contains("سس") || joined.contains("ترشی") || joined.contains("آبلیمو") || joined.contains("ادویه") || joined.contains("زیتون") -> "چاشنی و افزودنی"
+            joined.contains("کنسرو") || joined.contains("تن ماهی") || joined.contains("کمپوت") -> "کنسرو و غذای آماده"
+            else -> {
+                val sample = subNamesInGroup.take(2).joinToString("، ")
+                if (sample.isNotEmpty()) "دسته اصلی $parentId ($sample...)" else "دسته اصلی $parentId"
+            }
+        }
+    }
+
+    private fun fetchServerCategories(cookies: String, outMap: MutableMap<Int, String>) {
+        val urls = listOf(
+            "$CATEGORIES_URL_1?latitude=$LAT&longitude=$LNG",
+            "$CATEGORIES_URL_2?latitude=$LAT&longitude=$LNG"
+        )
+        for (u in urls) {
+            try {
+                val conn = (URL(u).openConnection() as HttpURLConnection).apply {
+                    requestMethod = "GET"
+                    connectTimeout = 8000
+                    readTimeout = 8000
+                    setRequestProperty("accept", "application/json, text/plain, */*")
+                    setRequestProperty("origin", "https://allbox.surenamarkets.com")
+                    setRequestProperty("referer", "https://allbox.surenamarkets.com/")
+                    setRequestProperty("x-auth-scope", "client")
+                    if (cookies.isNotEmpty()) setRequestProperty("Cookie", cookies)
+                }
+                if (conn.responseCode == 200) {
+                    val text = conn.inputStream.bufferedReader().use { it.readText() }.trim()
+                    if (text.startsWith("[")) {
+                        parseCategoryTree(JSONArray(text), outMap)
+                    } else if (text.startsWith("{")) {
+                        val obj = JSONObject(text)
+                        val arr = obj.optJSONArray("categories") ?: obj.optJSONArray("data") ?: obj.optJSONArray("items")
+                        if (arr != null) parseCategoryTree(arr, outMap)
+                    }
+                    if (outMap.isNotEmpty()) break
+                }
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun parseCategoryTree(arr: JSONArray, outMap: MutableMap<Int, String>) {
+        for (i in 0 until arr.length()) {
+            val item = arr.optJSONObject(i) ?: continue
+            val id = item.optInt("id", -1)
+            val name = item.optString("name", item.optString("title", ""))
+            if (id > 0 && name.isNotEmpty()) {
+                outMap[id] = name
+            }
+            val children = item.optJSONArray("children") ?: item.optJSONArray("subCategories") ?: item.optJSONArray("categories")
+            if (children != null) {
+                parseCategoryTree(children, outMap)
+            }
         }
     }
 
@@ -377,9 +517,15 @@ object DiscountEngine {
         return list
     }
 
-    fun getHistoryList(context: Context): JSONArray {
+    fun getHistoryList(context: Context): List<JSONObject> {
         val historyFile = File(context.filesDir, "changes_history.json")
-        return if (historyFile.exists()) JSONArray(historyFile.readText()) else JSONArray()
+        if (!historyFile.exists()) return emptyList()
+        val arr = JSONArray(historyFile.readText())
+        val list = mutableListOf<JSONObject>()
+        for (i in 0 until arr.length()) {
+            arr.optJSONObject(i)?.let { list.add(it) }
+        }
+        return list
     }
 
     fun clearHistory(context: Context) {
