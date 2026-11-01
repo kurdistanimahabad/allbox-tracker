@@ -2,7 +2,9 @@ package com.example.allboxtracker
 
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.app.PendingIntent
 import android.content.Context
+import android.content.Intent
 import android.os.Build
 import android.webkit.CookieManager
 import androidx.core.app.NotificationCompat
@@ -30,7 +32,6 @@ object DiscountEngine {
     private const val LAT = "36.774354703804"
     private const val LNG = "45.747235942022"
 
-    // ذخیره کوکی در حافظه دائم تا در پس‌زمینه هم در دسترس باشد
     fun syncAndGetCookies(context: Context): String {
         val prefs = context.getSharedPreferences("AllBoxPrefs", Context.MODE_PRIVATE)
         var liveCookies = ""
@@ -62,7 +63,6 @@ object DiscountEngine {
             val discoveredSubCategories = Collections.synchronizedSet(mutableSetOf<Int>())
             val categoryNamesMap = Collections.synchronizedMap(mutableMapOf<Int, String>())
 
-            // تلاش برای دریافت لیست رسمی دسته‌بندی‌های اصلی از سرور
             fetchServerCategories(combinedCookies, categoryNamesMap)
 
             fun addProductsFromList(items: JSONArray) {
@@ -106,7 +106,6 @@ object DiscountEngine {
             }
             addProductsFromList(initialItems)
 
-            // اسکن دسته‌بندی‌های اصلی و زیرمجموعه‌ها
             val mainCategoryIds = (1..60).toList()
             val scannedCategories = mutableSetOf<Int>()
 
@@ -145,7 +144,6 @@ object DiscountEngine {
                 return@withContext Pair(false, "هیچ محصولی دریافت نشد. ابتدا از تب «ورود» وارد حساب خود شوید.")
             }
 
-            // گروه‌بندی زیردسته‌ها برای تشخیص نام دسته‌بندی‌های اصلی
             val parentToSubNames = mutableMapOf<Int, MutableSet<String>>()
             for ((_, item) in collectedMap) {
                 val catObj = item.optJSONObject("category") ?: continue
@@ -325,7 +323,6 @@ object DiscountEngine {
         }
     }
 
-    // تشخیص نام دسته‌بندی اصلی (از سرور یا بر اساس زیرمجموعه‌های آن)
     private fun resolveMainCategoryName(
         parentId: Int,
         subCategoryName: String,
@@ -542,12 +539,24 @@ object DiscountEngine {
             manager.createNotificationChannel(channel)
         }
 
+        // باز شدن مستقیم برنامه هنگام کلیک روی نوتیفیکیشن
+        val openAppIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            0,
+            openAppIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
         val notification = NotificationCompat.Builder(context, channelId)
             .setSmallIcon(android.R.drawable.ic_popup_reminder)
             .setContentTitle(title)
             .setContentText(message)
             .setStyle(NotificationCompat.BigTextStyle().bigText(message))
             .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setContentIntent(pendingIntent)
             .setAutoCancel(true)
             .build()
 
