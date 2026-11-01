@@ -3,11 +3,16 @@ package com.example.allboxtracker
 import android.Manifest
 import android.app.AlertDialog
 import android.app.TimePickerDialog
+import android.content.Context
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.text.Editable
 import android.text.InputType
 import android.text.TextWatcher
@@ -29,14 +34,18 @@ import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
 
-    private lateinit var historyContainer: LinearLayout
+    // اجزای تب ۱: تغییرات
     private lateinit var statusTextView: TextView
-    private lateinit var alarmsListLayout: LinearLayout
-    private lateinit var intervalInfoTextView: TextView
-    private lateinit var webView: WebView
+    private lateinit var historySearchEditText: EditText
+    private lateinit var historyTypeSpinner: Spinner
+    private lateinit var historyListView: ListView
+    private var allHistoryItems: List<JSONObject> = emptyList()
+    private var displayedHistoryItems: List<JSONObject> = emptyList()
+    private lateinit var historyAdapter: BaseAdapter
 
-    // اجزای تب «همه محصولات»
-    private lateinit var categorySpinner: Spinner
+    // اجزای تب ۲: همه محصولات
+    private lateinit var mainCategorySpinner: Spinner
+    private lateinit var subCategorySpinner: Spinner
     private lateinit var sortSpinner: Spinner
     private lateinit var searchEditText: EditText
     private lateinit var inStockCheckBox: CheckBox
@@ -45,6 +54,13 @@ class MainActivity : AppCompatActivity() {
     private var allCachedProducts: List<JSONObject> = emptyList()
     private var displayedProducts: List<JSONObject> = emptyList()
     private lateinit var productsAdapter: BaseAdapter
+    private var isUpdatingSpinners = false
+
+    // اجزای تب ۳ و ۴
+    private lateinit var alarmsListLayout: LinearLayout
+    private lateinit var intervalInfoTextView: TextView
+    private lateinit var batteryStatusBtn: Button
+    private lateinit var webView: WebView
 
     private val tabButtons = mutableListOf<Button>()
 
@@ -91,8 +107,9 @@ class MainActivity : AppCompatActivity() {
                 btn.setBackgroundColor(if (i == index) Color.parseColor("#2563EB") else Color.parseColor("#334155"))
             }
 
-            if (index == 0) refreshHistoryUI()
+            if (index == 0) loadAndFilterHistory()
             if (index == 1) loadAndFilterAllProducts()
+            if (index == 2) updateBatteryButtonState()
         }
 
         val titles = listOf("📊 تغییرات", "📦 همه محصولات", "⏰ زمان‌بندی", "🔑 ورود")
@@ -114,11 +131,18 @@ class MainActivity : AppCompatActivity() {
         switchTab(0)
     }
 
-    // ==================== تب ۱: لیست تغییرات (افزایش، کاهش، کالای جدید) ====================
+    override fun onResume() {
+        super.onResume()
+        if (::batteryStatusBtn.isInitialized) {
+            updateBatteryButtonState()
+        }
+    }
+
+    // ==================== تب ۱: لیست تغییرات (با جستجو + نمایش قیمت مصرف‌کننده) ====================
     private fun createHistoryTab(): View {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(20, 20, 20, 20)
+            setPadding(16, 16, 16, 16)
         }
 
         val btnManualCheck = Button(this).apply {
@@ -141,15 +165,53 @@ class MainActivity : AppCompatActivity() {
                     isEnabled = true
                     text = "🔄 بررسی و بروزرسانی دستی تمام محصولات"
                     Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
-                    refreshHistoryUI()
+                    loadAndFilterHistory()
                 }
             }
         }
 
+        // ردیف جستجو و فیلتر در تب تغییرات
+        val searchRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 12, 0, 8)
+        }
+
+        historySearchEditText = EditText(this).apply {
+            hint = "🔍 جستجوی نام محصول در تغییرات..."
+            setSingleLine(true)
+            setBackgroundColor(Color.WHITE)
+            setPadding(18, 14, 18, 14)
+            textSize = 13.5f
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
+                override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
+                    applyHistoryFilters()
+                }
+                override fun afterTextChanged(s: Editable?) {}
+            })
+        }
+
+        historyTypeSpinner = Spinner(this).apply {
+            setBackgroundColor(Color.WHITE)
+            val types = listOf("همه تغییرات", "🟢 افزایش تخفیف", "🔴 کاهش تخفیف", "🆕 کالای جدید")
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, types)
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    applyHistoryFilters()
+                }
+                override fun onNothingSelected(parent: AdapterView<*>?) {}
+            }
+        }
+
+        searchRow.addView(historySearchEditText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.2f).apply {
+            setMargins(0, 0, 8, 0)
+        })
+        searchRow.addView(historyTypeSpinner, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.8f))
+
         val topInfoRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 14, 0, 14)
+            setPadding(0, 6, 0, 10)
         }
 
         statusTextView = TextView(this).apply {
@@ -162,20 +224,107 @@ class MainActivity : AppCompatActivity() {
             textSize = 11f
             setOnClickListener {
                 DiscountEngine.clearHistory(this@MainActivity)
-                refreshHistoryUI()
+                loadAndFilterHistory()
             }
         }
 
         topInfoRow.addView(statusTextView, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         topInfoRow.addView(btnClear)
 
-        val scrollView = ScrollView(this)
-        historyContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-        scrollView.addView(historyContainer)
+        val numFormat = NumberFormat.getNumberInstance(Locale.US)
+
+        historyAdapter = object : BaseAdapter() {
+            override fun getCount(): Int = displayedHistoryItems.size
+            override fun getItem(position: Int): JSONObject = displayedHistoryItems[position]
+            override fun getItemId(position: Int): Long = position.toLong()
+
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
+                val card = (convertView as? LinearLayout) ?: LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(24, 18, 24, 18)
+                }
+                card.removeAllViews()
+
+                val item = getItem(position)
+                val recordType = item.optString("type", "CHANGE")
+                val isBetter = item.optBoolean("isBetter", true)
+
+                val bgColor = when (recordType) {
+                    "NEW_PRODUCT" -> "#EFF6FF"
+                    "DISCOUNT_DOWN" -> "#FEF2F2"
+                    else -> if (isBetter) "#F0FDF4" else "#FEF2F2"
+                }
+                card.setBackgroundColor(Color.parseColor(bgColor))
+
+                val mainCat = item.optString("mainCategory", "")
+                val titleView = TextView(this@MainActivity).apply {
+                    val catPrefix = if (mainCat.isNotEmpty()) "$mainCat > " else ""
+                    text = "$catPrefix${item.optString("name")}"
+                    textSize = 14.5f
+                    setTypeface(null, Typeface.BOLD)
+                    setTextColor(Color.BLACK)
+                }
+
+                val oldD = item.optInt("oldDiscount", 0)
+                val newD = item.optInt("newDiscount", 0)
+                val oldBuy = numFormat.format(item.optLong("oldPrice", 0L))
+                val newBuy = numFormat.format(item.optLong("newPrice", 0L))
+
+                val newRetailLong = item.optLong("newRetailPrice", item.optLong("oldPrice", 0L))
+                val oldRetailLong = item.optLong("oldRetailPrice", newRetailLong)
+                val oldRetail = numFormat.format(oldRetailLong)
+                val newRetail = numFormat.format(newRetailLong)
+
+                val retailLine = if (oldRetailLong > 0 && oldRetailLong != newRetailLong && recordType != "NEW_PRODUCT") {
+                    "قیمت مصرف‌کننده: از $oldRetail به $newRetail ریال"
+                } else if (newRetailLong > 0) {
+                    "قیمت مصرف‌کننده: $newRetail ریال"
+                } else {
+                    "قیمت مصرف‌کننده: ثبت نشده"
+                }
+
+                val detailView = TextView(this@MainActivity).apply {
+                    when (recordType) {
+                        "NEW_PRODUCT" -> {
+                            text = "🆕 محصول جدید!  |  تخفیف: $newD%\nقیمت خرید: $newBuy ریال\n$retailLine"
+                            setTextColor(Color.parseColor("#1D4ED8"))
+                        }
+                        "DISCOUNT_DOWN" -> {
+                            text = "🔴 کاهش تخفیف: از $oldD% به $newD%\nقیمت خرید: از $oldBuy به $newBuy ریال\n$retailLine"
+                            setTextColor(Color.parseColor("#B91C1C"))
+                        }
+                        else -> {
+                            val label = if (isBetter) "🟢 افزایش تخفیف:" else "🔴 کاهش تخفیف:"
+                            text = "$label از $oldD% به $newD%\nقیمت خرید: از $oldBuy به $newBuy ریال\n$retailLine"
+                            setTextColor(if (isBetter) Color.parseColor("#15803D") else Color.parseColor("#B91C1C"))
+                        }
+                    }
+                    textSize = 13.5f
+                    setPadding(0, 8, 0, 8)
+                }
+
+                val timeView = TextView(this@MainActivity).apply {
+                    text = "🕒 زمان ثبت: ${item.optString("time")}"
+                    textSize = 11.5f
+                    setTextColor(Color.DKGRAY)
+                }
+
+                card.addView(titleView)
+                card.addView(detailView)
+                card.addView(timeView)
+                return card
+            }
+        }
+
+        historyListView = ListView(this).apply {
+            dividerHeight = 12
+            adapter = historyAdapter
+        }
 
         layout.addView(btnManualCheck)
+        layout.addView(searchRow)
         layout.addView(topInfoRow)
-        layout.addView(scrollView, LinearLayout.LayoutParams(
+        layout.addView(historyListView, LinearLayout.LayoutParams(
             LinearLayout.LayoutParams.MATCH_PARENT,
             LinearLayout.LayoutParams.MATCH_PARENT
         ))
@@ -183,108 +332,59 @@ class MainActivity : AppCompatActivity() {
         return layout
     }
 
-    private fun refreshHistoryUI() {
-        val prefs = getSharedPreferences("AllBoxPrefs", MODE_PRIVATE)
-        val lastCheck = prefs.getString("LAST_CHECK_TIME", "هنوز بررسی نشده")
-        statusTextView.text = "آخرین بروزرسانی: $lastCheck"
-
-        historyContainer.removeAllViews()
-        val historyArray = DiscountEngine.getHistoryList(this)
-        val numFormat = NumberFormat.getNumberInstance(Locale.US)
-
-        if (historyArray.length() == 0) {
-            val emptyView = TextView(this).apply {
-                text = "هنوز هیچ تغییر قیمت (افزایش یا کاهش تخفیف) یا کالای جدیدی ثبت نشده است.\n\nبرای مشاهده کل کالاهای فعلی سایت، به تب «📦 همه محصولات» بروید."
-                textSize = 14f
-                gravity = Gravity.CENTER
-                setPadding(32, 80, 32, 32)
-            }
-            historyContainer.addView(emptyView)
-            return
-        }
-
-        for (i in 0 until historyArray.length()) {
-            val item = historyArray.getJSONObject(i)
-            val recordType = item.optString("type", "CHANGE")
-            val isBetter = item.optBoolean("isBetter", true)
-
-            val bgColor = when (recordType) {
-                "NEW_PRODUCT" -> "#EFF6FF"
-                "DISCOUNT_DOWN" -> "#FEF2F2"
-                else -> "#F0FDF4"
-            }
-
-            val card = LinearLayout(this).apply {
-                orientation = LinearLayout.VERTICAL
-                setBackgroundColor(Color.parseColor(bgColor))
-                setPadding(24, 18, 24, 18)
-                val params = LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    LinearLayout.LayoutParams.WRAP_CONTENT
-                ).apply { setMargins(0, 0, 0, 14) }
-                layoutParams = params
-            }
-
-            val titleView = TextView(this).apply {
-                text = item.optString("name")
-                textSize = 15f
-                setTypeface(null, Typeface.BOLD)
-                setTextColor(Color.BLACK)
-            }
-
-            val detailView = TextView(this).apply {
-                val oldD = item.optInt("oldDiscount")
-                val newD = item.optInt("newDiscount")
-                val oldP = numFormat.format(item.optLong("oldPrice"))
-                val newP = numFormat.format(item.optLong("newPrice"))
-
-                when (recordType) {
-                    "NEW_PRODUCT" -> {
-                        text = "🆕 محصول جدید!  |  تخفیف: $newD%  |  قیمت خرید: $newP ریال"
-                        setTextColor(Color.parseColor("#1D4ED8"))
-                    }
-                    "DISCOUNT_DOWN" -> {
-                        text = "🔴 کاهش تخفیف: از $oldD% به $newD%\nقیمت خرید: از $oldP به $newP ریال"
-                        setTextColor(Color.parseColor("#B91C1C"))
-                    }
-                    else -> {
-                        val label = if (isBetter) "🟢 افزایش تخفیف:" else "🔴 کاهش تخفیف:"
-                        text = "$label از $oldD% به $newD%\nقیمت خرید: از $oldP به $newP ریال"
-                        setTextColor(if (isBetter) Color.parseColor("#15803D") else Color.parseColor("#B91C1C"))
-                    }
-                }
-                textSize = 13.5f
-                setPadding(0, 8, 0, 8)
-            }
-
-            val timeView = TextView(this).apply {
-                text = "🕒 زمان ثبت: ${item.optString("time")}"
-                textSize = 11.5f
-                setTextColor(Color.DKGRAY)
-            }
-
-            card.addView(titleView)
-            card.addView(detailView)
-            card.addView(timeView)
-            historyContainer.addView(card)
-        }
+    private fun loadAndFilterHistory() {
+        allHistoryItems = DiscountEngine.getHistoryList(this)
+        applyHistoryFilters()
     }
 
-    // ==================== تب ۲: لیست تمام محصولات سایت (با فیلتر موجودی و محبوب‌ترین‌ها) ====================
+    private fun applyHistoryFilters() {
+        val prefs = getSharedPreferences("AllBoxPrefs", MODE_PRIVATE)
+        val lastCheck = prefs.getString("LAST_CHECK_TIME", "هنوز بررسی نشده")
+        val query = historySearchEditText.text.toString().trim()
+        val typeFilter = historyTypeSpinner.selectedItemPosition
+
+        displayedHistoryItems = allHistoryItems.filter { item ->
+            val matchQuery = query.isEmpty() ||
+                item.optString("name", "").contains(query, ignoreCase = true) ||
+                item.optString("mainCategory", "").contains(query, ignoreCase = true) ||
+                item.optString("category", "").contains(query, ignoreCase = true)
+
+            val recType = item.optString("type", "CHANGE")
+            val isBetter = item.optBoolean("isBetter", true)
+            val matchType = when (typeFilter) {
+                1 -> recType == "DISCOUNT_UP" || (recType == "CHANGE" && isBetter)
+                2 -> recType == "DISCOUNT_DOWN" || (recType == "CHANGE" && !isBetter)
+                3 -> recType == "NEW_PRODUCT"
+                else -> true
+            }
+            matchQuery && matchType
+        }
+
+        statusTextView.text = "آخرین بروزرسانی: $lastCheck | نمایش ${displayedHistoryItems.size} تغییر"
+        historyAdapter.notifyDataSetChanged()
+    }
+
+    // ==================== تب ۲: همه محصولات (با فیلتر دسته‌بندی اصلی و زیردسته) ====================
     private fun createAllProductsTab(): View {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(16, 16, 16, 16)
+            setPadding(16, 14, 16, 14)
         }
 
         val prefs = getSharedPreferences("AllBoxPrefs", MODE_PRIVATE)
 
-        // کادر جستجوی نام محصول
+        // ردیف ۱: جستجو + مرتب‌سازی
+        val topSearchSortRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 0, 0, 8)
+        }
+
         searchEditText = EditText(this).apply {
             hint = "🔍 جستجوی نام کالا یا برند..."
             setSingleLine(true)
             setBackgroundColor(Color.WHITE)
-            setPadding(20, 16, 20, 16)
+            setPadding(18, 14, 18, 14)
+            textSize = 13.5f
             addTextChangedListener(object : TextWatcher {
                 override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
                 override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
@@ -294,31 +394,15 @@ class MainActivity : AppCompatActivity() {
             })
         }
 
-        // ردیف انتخاب دسته‌بندی و مرتب‌سازی
-        val filterRow = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            setPadding(0, 10, 0, 8)
-        }
-
-        categorySpinner = Spinner(this).apply {
-            setBackgroundColor(Color.WHITE)
-            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
-                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
-                    applyProductFilters()
-                }
-                override fun onNothingSelected(parent: AdapterView<*>?) {}
-            }
-        }
-
         sortSpinner = Spinner(this).apply {
             setBackgroundColor(Color.WHITE)
             val sortOptions = listOf(
-                "⭐ محبوب‌ترین محصولات",
-                "🔥 بیشترین درصد تخفیف",
-                "📉 کمترین درصد تخفیف",
-                "💰 ارزان‌ترین قیمت",
-                "💎 گران‌ترین قیمت",
-                "📂 بر اساس دسته‌بندی"
+                "⭐ محبوب‌ترین‌ها",
+                "🔥 بیشترین تخفیف",
+                "📉 کمترین تخفیف",
+                "💰 ارزان‌ترین",
+                "💎 گران‌ترین",
+                "📂 دسته‌بندی"
             )
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, sortOptions)
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
@@ -329,30 +413,66 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        filterRow.addView(categorySpinner, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.05f).apply {
+        topSearchSortRow.addView(searchEditText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.15f).apply {
             setMargins(0, 0, 8, 0)
         })
-        filterRow.addView(sortSpinner, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.95f))
+        topSearchSortRow.addView(sortSpinner, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.85f))
+
+        // ردیف ۲: انتخاب دسته‌بندی اصلی و زیردسته
+        val categoryRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 4, 0, 6)
+        }
+
+        mainCategorySpinner = Spinner(this).apply {
+            setBackgroundColor(Color.WHITE)
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    if (!isUpdatingSpinners) {
+                        populateSubCategorySpinner()
+                        applyProductFilters()
+                    }
+                }
+                override fun onNothingSelected(parent: AdapterView<*>?) {}
+            }
+        }
+
+        subCategorySpinner = Spinner(this).apply {
+            setBackgroundColor(Color.WHITE)
+            onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
+                override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+                    if (!isUpdatingSpinners) {
+                        applyProductFilters()
+                    }
+                }
+                override fun onNothingSelected(parent: AdapterView<*>?) {}
+            }
+        }
+
+        categoryRow.addView(mainCategorySpinner, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+            setMargins(0, 0, 8, 0)
+        })
+        categoryRow.addView(subCategorySpinner, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
         // گزینه فیلتر نمایش فقط محصولات موجود
         inStockCheckBox = CheckBox(this).apply {
             text = "✅ فقط نمایش کالاهای موجود در انبار (حذف ناموجودها)"
-            textSize = 13.5f
+            textSize = 13f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.parseColor("#0F766E"))
             isChecked = prefs.getBoolean("ONLY_IN_STOCK_FILTER", false)
-            setPadding(8, 6, 8, 6)
+            setPadding(6, 4, 6, 4)
             setOnCheckedChangeListener { _, isChecked ->
                 prefs.edit().putBoolean("ONLY_IN_STOCK_FILTER", isChecked).apply()
-                applyProductFilters()
+                loadAndFilterAllProducts()
             }
         }
 
         productsCountTv = TextView(this).apply {
-            textSize = 12.5f
+            textSize = 12f
             setTypeface(null, Typeface.BOLD)
             setTextColor(Color.parseColor("#1E293B"))
-            setPadding(4, 4, 4, 10)
+            setPadding(4, 2, 4, 8)
         }
 
         val numFormat = NumberFormat.getNumberInstance(Locale.US)
@@ -365,13 +485,14 @@ class MainActivity : AppCompatActivity() {
             override fun getView(position: Int, convertView: View?, parent: ViewGroup?): View {
                 val card = (convertView as? LinearLayout) ?: LinearLayout(this@MainActivity).apply {
                     orientation = LinearLayout.VERTICAL
-                    setPadding(24, 18, 24, 18)
+                    setPadding(24, 16, 24, 16)
                 }
                 card.removeAllViews()
 
                 val item = getItem(position)
                 val rawName = item.optString("rawName", item.optString("name"))
-                val catName = item.optString("category", "سایر")
+                val mainCat = item.optString("mainCategory", "")
+                val subCat = item.optString("category", "سایر")
                 val brand = item.optString("brand", "")
                 val discount = item.optInt("discount", 0)
                 val price = numFormat.format(item.optLong("price", 0L))
@@ -379,21 +500,21 @@ class MainActivity : AppCompatActivity() {
                 val stock = item.optInt("stock", 0)
                 val isPromoted = item.optBoolean("isPromoted", false)
 
-                // رنگ پس‌زمینه کارت (اگر ناموجود باشد خاکستری کمرنگ، اگر موجود باشد سفید)
                 card.setBackgroundColor(if (stock > 0) Color.WHITE else Color.parseColor("#F1F5F9"))
 
                 val topBadgeTv = TextView(this@MainActivity).apply {
+                    val catHierarchy = if (mainCat.isNotEmpty() && mainCat != subCat) "$mainCat > $subCat" else subCat
                     val brandPart = if (brand.isNotEmpty()) " | برند: $brand" else ""
                     val stockPart = if (stock > 0) "موجودی: $stock" else "❌ ناموجود"
-                    val promoPart = if (isPromoted) "⭐ محبوب/ویژه | " else ""
-                    text = "${promoPart}📂 دسته: $catName$brandPart  |  $stockPart"
-                    textSize = 12f
+                    val promoPart = if (isPromoted) "⭐ ویژه | " else ""
+                    text = "${promoPart}📂 $catHierarchy$brandPart  |  $stockPart"
+                    textSize = 11.5f
                     setTextColor(if (stock > 0) Color.parseColor("#475569") else Color.parseColor("#B91C1C"))
                 }
 
                 val nameTv = TextView(this@MainActivity).apply {
                     text = rawName
-                    textSize = 15f
+                    textSize = 14.5f
                     setTypeface(null, Typeface.BOLD)
                     setTextColor(if (stock > 0) Color.BLACK else Color.GRAY)
                     setPadding(0, 6, 0, 6)
@@ -423,8 +544,8 @@ class MainActivity : AppCompatActivity() {
             adapter = productsAdapter
         }
 
-        layout.addView(searchEditText)
-        layout.addView(filterRow)
+        layout.addView(topSearchSortRow)
+        layout.addView(categoryRow)
         layout.addView(inStockCheckBox)
         layout.addView(productsCountTv)
         layout.addView(productsListView, LinearLayout.LayoutParams(
@@ -436,81 +557,136 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun loadAndFilterAllProducts() {
+        isUpdatingSpinners = true
         allCachedProducts = DiscountEngine.getAllProductsList(this)
 
         val onlyInStock = inStockCheckBox.isChecked
-        val baseForCount = if (onlyInStock) {
+        val baseList = if (onlyInStock) {
             allCachedProducts.filter { it.optInt("stock", 0) > 0 }
         } else {
             allCachedProducts
         }
 
-        val categoryCounts = mutableMapOf<String, Int>()
-        for (prod in baseForCount) {
-            val cat = prod.optString("category", "سایر")
-            categoryCounts[cat] = (categoryCounts[cat] ?: 0) + 1
+        val mainCatCounts = mutableMapOf<String, Int>()
+        for (prod in baseList) {
+            val mCat = prod.optString("mainCategory", "").ifEmpty { prod.optString("category", "سایر") }
+            mainCatCounts[mCat] = (mainCatCounts[mCat] ?: 0) + 1
         }
 
-        val currentSelection = categorySpinner.selectedItem as? String
-        val spinnerItems = mutableListOf("همه دسته‌بندی‌ها (${baseForCount.size})")
-        categoryCounts.entries.sortedByDescending { it.value }.forEach { (cat, count) ->
-            spinnerItems.add("$cat ($count)")
+        val prevMain = (mainCategorySpinner.selectedItem as? String)?.substringBefore(" (")
+        val mainItems = mutableListOf("همه دسته‌های اصلی (${baseList.size})")
+        mainCatCounts.entries.sortedByDescending { it.value }.forEach { (mCat, count) ->
+            mainItems.add("$mCat ($count)")
         }
 
-        categorySpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, spinnerItems)
-        if (currentSelection != null) {
-            val prefix = currentSelection.substringBefore(" (")
-            val matchIndex = spinnerItems.indexOfFirst { it.startsWith("$prefix (") }
-            if (matchIndex >= 0) categorySpinner.setSelection(matchIndex)
+        mainCategorySpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, mainItems)
+        if (prevMain != null) {
+            val idx = mainItems.indexOfFirst { it.startsWith("$prevMain (") }
+            if (idx >= 0) mainCategorySpinner.setSelection(idx)
         }
 
+        populateSubCategorySpinner()
+        isUpdatingSpinners = false
         applyProductFilters()
     }
 
+    private fun populateSubCategorySpinner() {
+        val onlyInStock = inStockCheckBox.isChecked
+        val selectedMainRaw = (mainCategorySpinner.selectedItem as? String) ?: "همه دسته‌های اصلی"
+        val selectedMain = if (selectedMainRaw.startsWith("همه دسته‌های اصلی")) null else selectedMainRaw.substringBefore(" (")
+
+        val relevantProducts = allCachedProducts.filter { item ->
+            val matchStock = !onlyInStock || item.optInt("stock", 0) > 0
+            val itemMain = item.optString("mainCategory", "").ifEmpty { item.optString("category", "سایر") }
+            val matchMain = selectedMain == null || itemMain == selectedMain
+            matchStock && matchMain
+        }
+
+        val subCatCounts = mutableMapOf<String, Int>()
+        for (prod in relevantProducts) {
+            val sCat = prod.optString("category", "سایر")
+            subCatCounts[sCat] = (subCatCounts[sCat] ?: 0) + 1
+        }
+
+        val prevSub = (subCategorySpinner.selectedItem as? String)?.substringBefore(" (")
+        val subItems = mutableListOf("همه زیردسته‌ها (${relevantProducts.size})")
+        subCatCounts.entries.sortedByDescending { it.value }.forEach { (sCat, count) ->
+            subItems.add("$sCat ($count)")
+        }
+
+        subCategorySpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, subItems)
+        if (prevSub != null) {
+            val idx = subItems.indexOfFirst { it.startsWith("$prevSub (") }
+            if (idx >= 0) subCategorySpinner.setSelection(idx)
+        }
+    }
+
     private fun applyProductFilters() {
-        val selectedCatItem = (categorySpinner.selectedItem as? String) ?: "همه دسته‌بندی‌ها"
-        val selectedCat = if (selectedCatItem.startsWith("همه دسته‌بندی‌ها")) null else selectedCatItem.substringBefore(" (")
+        val selectedMainRaw = (mainCategorySpinner.selectedItem as? String) ?: "همه دسته‌های اصلی"
+        val selectedMain = if (selectedMainRaw.startsWith("همه دسته‌های اصلی")) null else selectedMainRaw.substringBefore(" (")
+
+        val selectedSubRaw = (subCategorySpinner.selectedItem as? String) ?: "همه زیردسته‌ها"
+        val selectedSub = if (selectedSubRaw.startsWith("همه زیردسته‌ها")) null else selectedSubRaw.substringBefore(" (")
+
         val query = searchEditText.text.toString().trim()
         val onlyInStock = inStockCheckBox.isChecked
         val sortIndex = sortSpinner.selectedItemPosition
 
         var filtered = allCachedProducts.filter { item ->
             val matchStock = !onlyInStock || item.optInt("stock", 0) > 0
-            val matchCat = selectedCat == null || item.optString("category", "سایر") == selectedCat
+            val itemMain = item.optString("mainCategory", "").ifEmpty { item.optString("category", "سایر") }
+            val itemSub = item.optString("category", "سایر")
+
+            val matchMain = selectedMain == null || itemMain == selectedMain
+            val matchSub = selectedSub == null || itemSub == selectedSub
             val matchSearch = query.isEmpty() ||
                 item.optString("name", "").contains(query, ignoreCase = true) ||
                 item.optString("brand", "").contains(query, ignoreCase = true)
-            matchStock && matchCat && matchSearch
+
+            matchStock && matchMain && matchSub && matchSearch
+        }
+
+        val popularityComparator = Comparator<JSONObject> { a, b ->
+            val stockA = if (a.optInt("stock", 0) > 0) 1 else 0
+            val stockB = if (b.optInt("stock", 0) > 0) 1 else 0
+            if (stockA != stockB) return@Comparator stockB.compareTo(stockA)
+
+            val promoA = if (a.optBoolean("isPromoted", false)) 1 else 0
+            val promoB = if (b.optBoolean("isPromoted", false)) 1 else 0
+            if (promoA != promoB) return@Comparator promoB.compareTo(promoA)
+
+            val scoreA = a.optInt("salesScore", 0)
+            val scoreB = b.optInt("salesScore", 0)
+            if (scoreA != scoreB) return@Comparator scoreB.compareTo(scoreA)
+
+            val rankA = a.optInt("rank", Int.MAX_VALUE)
+            val rankB = b.optInt("rank", Int.MAX_VALUE)
+            rankA.compareTo(rankB)
+        }
+
+        val categoryComparator = Comparator<JSONObject> { a, b ->
+            val c1 = a.optString("mainCategory", "").compareTo(b.optString("mainCategory", ""))
+            if (c1 != 0) return@Comparator c1
+            val c2 = a.optString("category", "").compareTo(b.optString("category", ""))
+            if (c2 != 0) return@Comparator c2
+            a.optString("rawName", "").compareTo(b.optString("rawName", ""))
         }
 
         filtered = when (sortIndex) {
-            // ۰: محبوب‌ترین محصولات (بر اساس کالاهای ویژه/پرفروش سایت و رتبه نمایش در ویترین اصلی آل‌باکس)
-            0 -> filtered.sortedWith(
-                compareByDescending<JSONObject> { it.optInt("stock", 0) > 0 }
-                    .thenByDescending { it.optBoolean("isPromoted", false) }
-                    .thenByDescending { it.optInt("salesScore", 0) }
-                    .thenBy { it.optInt("rank", Int.MAX_VALUE) }
-                    .thenByDescending { it.optInt("discount", 0) }
-            )
-            // ۱: بیشترین درصد تخفیف
+            0 -> filtered.sortedWith(popularityComparator)
             1 -> filtered.sortedByDescending { it.optInt("discount", 0) }
-            // ۲: کمترین درصد تخفیف
             2 -> filtered.sortedBy { it.optInt("discount", 0) }
-            // ۳: ارزان‌ترین قیمت
             3 -> filtered.sortedBy { it.optLong("price", 0L) }
-            // ۴: گران‌ترین قیمت
             4 -> filtered.sortedByDescending { it.optLong("price", 0L) }
-            // ۵: بر اساس دسته‌بندی
-            else -> filtered.sortedWith(compareBy({ it.optString("category", "") }, { it.optString("rawName", "") }))
+            else -> filtered.sortedWith(categoryComparator)
         }
 
         displayedProducts = filtered
-        val stockText = if (onlyInStock) "فقط موجودها" else "موجود و ناموجود"
-        productsCountTv.text = "نمایش ${displayedProducts.size} کالا ($stockText - از کل ${allCachedProducts.size} کالا)"
+        productsCountTv.text = "نمایش ${displayedProducts.size} کالا (از مجموع ${allCachedProducts.size} کالای سایت)"
         productsAdapter.notifyDataSetChanged()
     }
 
-    // ==================== تب ۳: زمان‌بندی ====================
+    // ==================== تب ۳: زمان‌بندی + رفع محدودیت باتری ====================
     private fun createScheduleTab(): View {
         val scroll = ScrollView(this)
         val layout = LinearLayout(this).apply {
@@ -519,6 +695,21 @@ class MainActivity : AppCompatActivity() {
         }
 
         val prefs = getSharedPreferences("AllBoxPrefs", MODE_PRIVATE)
+
+        // دکمه رفع محدودیت باتری برای تضمین اجرای خودکار در پس‌زمینه
+        batteryStatusBtn = Button(this).apply {
+            textSize = 13.5f
+            setTypeface(null, Typeface.BOLD)
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 0, 0, 24) }
+            layoutParams = params
+            setOnClickListener {
+                requestIgnoreBatteryOptimization()
+            }
+        }
+        updateBatteryButtonState()
 
         val periodicCard = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -563,7 +754,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        AlarmHelper.updatePeriodicSchedule(this, isAutoEnabled, savedInterval)
+        AlarmHelper.restoreAllSchedules(this)
 
         periodicCard.addView(switchPeriodic)
         periodicCard.addView(intervalInfoTextView)
@@ -603,6 +794,7 @@ class MainActivity : AppCompatActivity() {
         alarmsListLayout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
         refreshAlarmsListUI()
 
+        layout.addView(batteryStatusBtn)
         layout.addView(periodicCard)
         layout.addView(btnAddTime)
         layout.addView(titleAlarms)
@@ -610,6 +802,37 @@ class MainActivity : AppCompatActivity() {
         scroll.addView(layout)
 
         return scroll
+    }
+
+    private fun updateBatteryButtonState() {
+        val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+        val isIgnoring = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            pm.isIgnoringBatteryOptimizations(packageName)
+        } else true
+
+        if (isIgnoring) {
+            batteryStatusBtn.text = "✅ اجرای بدون محدودیت در پس‌زمینه فعال است"
+            batteryStatusBtn.setBackgroundColor(Color.parseColor("#15803D"))
+            batteryStatusBtn.setTextColor(Color.WHITE)
+        } else {
+            batteryStatusBtn.text = "⚠️ ضربه بزنید: فعال‌سازی اجرای دائمی در پس‌زمینه (مهم)"
+            batteryStatusBtn.setBackgroundColor(Color.parseColor("#DC2626"))
+            batteryStatusBtn.setTextColor(Color.WHITE)
+        }
+    }
+
+    private fun requestIgnoreBatteryOptimization() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                val intent = Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                    data = Uri.parse("package:$packageName")
+                }
+                startActivity(intent)
+            } catch (_: Exception) {
+                val intent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)
+                startActivity(intent)
+            }
+        }
     }
 
     private fun showChangeIntervalDialog() {
@@ -723,7 +946,7 @@ class MainActivity : AppCompatActivity() {
         val layout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
         val hintTv = TextView(this).apply {
-            text = "یک بار در سایت زیر وارد حساب خود شوید؛ برنامه به صورت خودکار کوکی لاگین را ذخیره می‌کند."
+            text = "یک بار در سایت زیر وارد حساب خود شوید؛ برنامه به صورت خودکار کوکی لاگین را در حافظه دائم ذخیره می‌کند."
             setBackgroundColor(Color.parseColor("#FEF3C7"))
             setTextColor(Color.parseColor("#92400E"))
             setPadding(16, 16, 16, 16)
@@ -738,6 +961,7 @@ class MainActivity : AppCompatActivity() {
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
                     CookieManager.getInstance().flush()
+                    DiscountEngine.syncAndGetCookies(this@MainActivity)
                 }
             }
             loadUrl("https://allbox.surenamarkets.com")
