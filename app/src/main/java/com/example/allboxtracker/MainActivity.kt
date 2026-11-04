@@ -29,7 +29,6 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import org.json.JSONObject
-import java.text.NumberFormat
 import java.util.Locale
 import kotlin.math.abs
 
@@ -57,10 +56,11 @@ class MainActivity : AppCompatActivity() {
     private lateinit var productsAdapter: BaseAdapter
     private var isUpdatingSpinners = false
 
-    // اجزای تب ۳ و ۴
+    // اجزای تب ۳، ۴ و ۵
     private lateinit var alarmsListLayout: LinearLayout
     private lateinit var intervalInfoTextView: TextView
     private lateinit var batteryStatusBtn: Button
+    private lateinit var settingsContentContainer: LinearLayout
     private lateinit var webView: WebView
 
     private val tabButtons = mutableListOf<Button>()
@@ -80,45 +80,53 @@ class MainActivity : AppCompatActivity() {
             setBackgroundColor(Color.parseColor("#F5F7FA"))
         }
 
+        // نوار ۵ تب در بالای برنامه
         val tabBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setBackgroundColor(Color.parseColor("#1E293B"))
-            setPadding(6, 10, 6, 10)
+            setPadding(4, 8, 4, 8)
         }
 
         val tab1HistoryView = createHistoryTab()
         val tab2AllProductsView = createAllProductsTab()
         val tab3ScheduleView = createScheduleTab()
-        val tab4LoginView = createLoginTab()
+        val tab4SettingsView = createSettingsTab()
+        val tab5LoginView = createLoginTab()
 
         val contentFrame = FrameLayout(this).apply {
             addView(tab1HistoryView)
             addView(tab2AllProductsView)
             addView(tab3ScheduleView)
-            addView(tab4LoginView)
+            addView(tab4SettingsView)
+            addView(tab5LoginView)
         }
 
         fun switchTab(index: Int) {
             tab1HistoryView.visibility = if (index == 0) View.VISIBLE else View.GONE
             tab2AllProductsView.visibility = if (index == 1) View.VISIBLE else View.GONE
             tab3ScheduleView.visibility = if (index == 2) View.VISIBLE else View.GONE
-            tab4LoginView.visibility = if (index == 3) View.VISIBLE else View.GONE
+            tab4SettingsView.visibility = if (index == 3) View.VISIBLE else View.GONE
+            tab5LoginView.visibility = if (index == 4) View.VISIBLE else View.GONE
 
             tabButtons.forEachIndexed { i, btn ->
                 btn.setBackgroundColor(if (i == index) Color.parseColor("#2563EB") else Color.parseColor("#334155"))
             }
 
-            if (index == 0) loadAndFilterHistory()
+            if (index == 0) {
+                updateHistoryFilterSpinnerTitle()
+                loadAndFilterHistory()
+            }
             if (index == 1) loadAndFilterAllProducts()
             if (index == 2) updateBatteryButtonState()
+            if (index == 3) rebuildSettingsUI()
         }
 
-        val titles = listOf("📊 تغییرات", "📦 همه محصولات", "⏰ زمان‌بندی", "🔑 ورود")
+        val titles = listOf("📊 تغییرات", "📦 کالاها", "⏰ زمان‌بندی", "⚙️ تنظیمات", "🔑 ورود")
         titles.forEachIndexed { idx, title ->
             val btn = createTabButton(title) { switchTab(idx) }
             tabButtons.add(btn)
             tabBar.addView(btn, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
-                setMargins(4, 0, 4, 0)
+                setMargins(3, 0, 3, 0)
             })
         }
 
@@ -139,7 +147,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ==================== تب ۱: لیست تغییرات (با فیلترهای جدید و رنگ ویژه برای بالای ۲۰٪) ====================
+    // ==================== تب ۱: لیست تغییرات ====================
     private fun createHistoryTab(): View {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -171,7 +179,6 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // ردیف جستجو و فیلتر در تب تغییرات
         val searchRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, 12, 0, 8)
@@ -194,15 +201,6 @@ class MainActivity : AppCompatActivity() {
 
         historyTypeSpinner = Spinner(this).apply {
             setBackgroundColor(Color.WHITE)
-            val types = listOf(
-                "همه تغییرات",
-                "🟢 افزایش درصد تخفیف",
-                "🔴 کاهش درصد تخفیف",
-                "🏷️ تغییر قیمت مصرف‌کننده",
-                "🔥 تغییر تخفیف بالای ۲۰٪",
-                "🆕 کالای جدید"
-            )
-            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, types)
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
                     applyHistoryFilters()
@@ -210,6 +208,7 @@ class MainActivity : AppCompatActivity() {
                 override fun onNothingSelected(parent: AdapterView<*>?) {}
             }
         }
+        updateHistoryFilterSpinnerTitle()
 
         searchRow.addView(historySearchEditText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.1f).apply {
             setMargins(0, 0, 8, 0)
@@ -239,8 +238,6 @@ class MainActivity : AppCompatActivity() {
         topInfoRow.addView(statusTextView, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
         topInfoRow.addView(btnClear)
 
-        val numFormat = NumberFormat.getNumberInstance(Locale.US)
-
         historyAdapter = object : BaseAdapter() {
             override fun getCount(): Int = displayedHistoryItems.size
             override fun getItem(position: Int): JSONObject = displayedHistoryItems[position]
@@ -258,17 +255,24 @@ class MainActivity : AppCompatActivity() {
                 val isBetter = item.optBoolean("isBetter", true)
                 val oldD = item.optInt("oldDiscount", 0)
                 val newD = item.optInt("newDiscount", 0)
-                val isMajor = item.optBoolean("isMajorChange", abs(newD - oldD) > 20 && recordType != "RETAIL_PRICE_UP" && recordType != "RETAIL_PRICE_DOWN")
+                val threshold = AppSettings.getMajorDiscountThreshold(this@MainActivity)
+                val isMajor = abs(newD - oldD) >= threshold &&
+                    recordType != "RETAIL_PRICE_UP" &&
+                    recordType != "RETAIL_PRICE_DOWN" &&
+                    recordType != "NEW_PRODUCT"
 
-                // تعیین رنگ پس‌زمینه متمایز برای هر نوع تغییر (بنفش ویژه برای تغییرات بالای ۲۰ درصد)
-                val bgColor = when {
-                    isMajor && (recordType == "DISCOUNT_UP" || recordType == "DISCOUNT_DOWN" || recordType == "CHANGE") -> "#F3E8FF"
-                    recordType == "RETAIL_PRICE_UP" || recordType == "RETAIL_PRICE_DOWN" -> "#FFF7ED"
-                    recordType == "NEW_PRODUCT" -> "#EFF6FF"
-                    recordType == "DISCOUNT_DOWN" || (!isBetter && recordType == "CHANGE") -> "#FEF2F2"
-                    else -> "#F0FDF4"
+                // انتخاب کلید رنگ بر اساس نوع تغییر (خوانده شده از تنظیمات کاربر)
+                val colorKey = when {
+                    isMajor -> "MAJOR"
+                    recordType == "RETAIL_PRICE_UP" || recordType == "RETAIL_PRICE_DOWN" -> "RETAIL"
+                    recordType == "NEW_PRODUCT" -> "NEW"
+                    recordType == "DISCOUNT_DOWN" || (!isBetter && recordType == "CHANGE") -> "DOWN"
+                    else -> "UP"
                 }
-                card.setBackgroundColor(Color.parseColor(bgColor))
+
+                val bgHex = AppSettings.getBgColorHex(this@MainActivity, colorKey)
+                val txtHex = AppSettings.getTextColorHex(this@MainActivity, colorKey)
+                card.setBackgroundColor(AppSettings.safeParseColor(bgHex, Color.WHITE))
 
                 val mainCat = item.optString("mainCategory", "")
                 val titleView = TextView(this@MainActivity).apply {
@@ -279,18 +283,18 @@ class MainActivity : AppCompatActivity() {
                     setTextColor(Color.BLACK)
                 }
 
-                val oldBuy = numFormat.format(item.optLong("oldPrice", 0L))
-                val newBuy = numFormat.format(item.optLong("newPrice", 0L))
+                val oldBuy = AppSettings.formatPrice(this@MainActivity, item.optLong("oldPrice", 0L))
+                val newBuy = AppSettings.formatPrice(this@MainActivity, item.optLong("newPrice", 0L))
 
                 val newRetailLong = item.optLong("newRetailPrice", item.optLong("oldPrice", 0L))
                 val oldRetailLong = item.optLong("oldRetailPrice", newRetailLong)
-                val oldRetail = numFormat.format(oldRetailLong)
-                val newRetail = numFormat.format(newRetailLong)
+                val oldRetail = AppSettings.formatPrice(this@MainActivity, oldRetailLong)
+                val newRetail = AppSettings.formatPrice(this@MainActivity, newRetailLong)
 
                 val retailLine = if (oldRetailLong > 0 && oldRetailLong != newRetailLong && recordType != "NEW_PRODUCT") {
-                    "قیمت مصرف‌کننده: از $oldRetail به $newRetail ریال"
+                    "قیمت مصرف‌کننده: از $oldRetail به $newRetail"
                 } else if (newRetailLong > 0) {
-                    "قیمت مصرف‌کننده: $newRetail ریال"
+                    "قیمت مصرف‌کننده: $newRetail"
                 } else {
                     "قیمت مصرف‌کننده: ثبت نشده"
                 }
@@ -298,33 +302,28 @@ class MainActivity : AppCompatActivity() {
                 val detailView = TextView(this@MainActivity).apply {
                     when {
                         recordType == "NEW_PRODUCT" -> {
-                            text = "🆕 محصول جدید!  |  تخفیف: $newD%\nقیمت خرید: $newBuy ریال\n$retailLine"
-                            setTextColor(Color.parseColor("#1D4ED8"))
+                            text = "🆕 محصول جدید!  |  تخفیف: $newD%\nقیمت خرید: $newBuy\n$retailLine"
                         }
                         recordType == "RETAIL_PRICE_UP" -> {
-                            text = "📈 افزایش قیمت مصرف‌کننده: از $oldRetail به $newRetail ریال\nقیمت خرید: از $oldBuy به $newBuy ریال (تخفیف فعلی: $newD%)"
-                            setTextColor(Color.parseColor("#C2410C"))
+                            text = "📈 افزایش قیمت مصرف‌کننده: از $oldRetail به $newRetail\nقیمت خرید: از $oldBuy به $newBuy (تخفیف فعلی: $newD%)"
                         }
                         recordType == "RETAIL_PRICE_DOWN" -> {
-                            text = "📉 کاهش قیمت مصرف‌کننده: از $oldRetail به $newRetail ریال\nقیمت خرید: از $oldBuy به $newBuy ریال (تخفیف فعلی: $newD%)"
-                            setTextColor(Color.parseColor("#B45309"))
+                            text = "📉 کاهش قیمت مصرف‌کننده: از $oldRetail به $newRetail\nقیمت خرید: از $oldBuy به $newBuy (تخفیف فعلی: $newD%)"
                         }
                         isMajor -> {
                             val diff = abs(newD - oldD)
                             val majorLabel = if (isBetter) "🔥 افزایش ویژه تخفیف (+$diff%):" else "⚠️ کاهش شدید تخفیف (-$diff%):"
-                            text = "$majorLabel از $oldD% به $newD%\nقیمت خرید: از $oldBuy به $newBuy ریال\n$retailLine"
-                            setTextColor(Color.parseColor("#6B21A8"))
+                            text = "$majorLabel از $oldD% به $newD%\nقیمت خرید: از $oldBuy به $newBuy\n$retailLine"
                             setTypeface(null, Typeface.BOLD)
                         }
                         recordType == "DISCOUNT_DOWN" || !isBetter -> {
-                            text = "🔴 کاهش درصد تخفیف: از $oldD% به $newD%\nقیمت خرید: از $oldBuy به $newBuy ریال\n$retailLine"
-                            setTextColor(Color.parseColor("#B91C1C"))
+                            text = "🔴 کاهش درصد تخفیف: از $oldD% به $newD%\nقیمت خرید: از $oldBuy به $newBuy\n$retailLine"
                         }
                         else -> {
-                            text = "🟢 افزایش درصد تخفیف: از $oldD% به $newD%\nقیمت خرید: از $oldBuy به $newBuy ریال\n$retailLine"
-                            setTextColor(Color.parseColor("#15803D"))
+                            text = "🟢 افزایش درصد تخفیف: از $oldD% به $newD%\nقیمت خرید: از $oldBuy به $newBuy\n$retailLine"
                         }
                     }
+                    setTextColor(AppSettings.safeParseColor(txtHex, Color.DKGRAY))
                     textSize = 13.5f
                     setPadding(0, 8, 0, 8)
                 }
@@ -358,6 +357,22 @@ class MainActivity : AppCompatActivity() {
         return layout
     }
 
+    private fun updateHistoryFilterSpinnerTitle() {
+        if (!::historyTypeSpinner.isInitialized) return
+        val currentPos = historyTypeSpinner.selectedItemPosition.coerceAtLeast(0)
+        val threshold = AppSettings.getMajorDiscountThreshold(this)
+        val types = listOf(
+            "همه تغییرات",
+            "🟢 افزایش درصد تخفیف",
+            "🔴 کاهش درصد تخفیف",
+            "🏷️ تغییر قیمت مصرف‌کننده",
+            "🔥 تغییر تخفیف ویژه (${threshold}٪+)",
+            "🆕 کالای جدید / شارژ مجدد"
+        )
+        historyTypeSpinner.adapter = ArrayAdapter(this, android.R.layout.simple_spinner_dropdown_item, types)
+        if (currentPos < types.size) historyTypeSpinner.setSelection(currentPos)
+    }
+
     private fun loadAndFilterHistory() {
         allHistoryItems = DiscountEngine.getHistoryList(this)
         applyHistoryFilters()
@@ -368,6 +383,7 @@ class MainActivity : AppCompatActivity() {
         val lastCheck = prefs.getString("LAST_CHECK_TIME", "هنوز بررسی نشده")
         val query = historySearchEditText.text.toString().trim()
         val typeFilter = historyTypeSpinner.selectedItemPosition
+        val threshold = AppSettings.getMajorDiscountThreshold(this)
 
         displayedHistoryItems = allHistoryItems.filter { item ->
             val matchQuery = query.isEmpty() ||
@@ -379,18 +395,13 @@ class MainActivity : AppCompatActivity() {
             val isBetter = item.optBoolean("isBetter", true)
             val oldD = item.optInt("oldDiscount", 0)
             val newD = item.optInt("newDiscount", 0)
-            val isMajor = item.optBoolean("isMajorChange", abs(newD - oldD) > 20 && recType != "RETAIL_PRICE_UP" && recType != "RETAIL_PRICE_DOWN")
+            val isMajor = abs(newD - oldD) >= threshold && recType != "RETAIL_PRICE_UP" && recType != "RETAIL_PRICE_DOWN" && recType != "NEW_PRODUCT"
 
             val matchType = when (typeFilter) {
-                // ۱: افزایش درصد تخفیف
                 1 -> recType == "DISCOUNT_UP" || (recType == "CHANGE" && isBetter)
-                // ۲: کاهش درصد تخفیف
                 2 -> recType == "DISCOUNT_DOWN" || (recType == "CHANGE" && !isBetter)
-                // ۳: تغییر قیمت مصرف‌کننده
                 3 -> recType == "RETAIL_PRICE_UP" || recType == "RETAIL_PRICE_DOWN"
-                // ۴: تغییر تخفیف بالای ۲۰٪
                 4 -> isMajor
-                // ۵: کالای جدید
                 5 -> recType == "NEW_PRODUCT"
                 else -> true
             }
@@ -401,7 +412,7 @@ class MainActivity : AppCompatActivity() {
         historyAdapter.notifyDataSetChanged()
     }
 
-    // ==================== تب ۲: همه محصولات (با فیلتر دسته‌بندی اصلی و زیردسته) ====================
+    // ==================== تب ۲: همه محصولات ====================
     private fun createAllProductsTab(): View {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -509,8 +520,6 @@ class MainActivity : AppCompatActivity() {
             setPadding(4, 2, 4, 8)
         }
 
-        val numFormat = NumberFormat.getNumberInstance(Locale.US)
-
         productsAdapter = object : BaseAdapter() {
             override fun getCount(): Int = displayedProducts.size
             override fun getItem(position: Int): JSONObject = displayedProducts[position]
@@ -529,10 +538,11 @@ class MainActivity : AppCompatActivity() {
                 val subCat = item.optString("category", "سایر")
                 val brand = item.optString("brand", "")
                 val discount = item.optInt("discount", 0)
-                val price = numFormat.format(item.optLong("price", 0L))
-                val retail = numFormat.format(item.optLong("retailPrice", 0L))
+                val price = AppSettings.formatPrice(this@MainActivity, item.optLong("price", 0L))
+                val retail = AppSettings.formatPrice(this@MainActivity, item.optLong("retailPrice", 0L))
                 val stock = item.optInt("stock", 0)
                 val isPromoted = item.optBoolean("isPromoted", false)
+                val majorThreshold = AppSettings.getMajorDiscountThreshold(this@MainActivity)
 
                 card.setBackgroundColor(if (stock > 0) Color.WHITE else Color.parseColor("#F1F5F9"))
 
@@ -555,13 +565,13 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 val priceTv = TextView(this@MainActivity).apply {
-                    text = "🏷️ تخفیف: $discount%   |   خرید: $price ریال\nقیمت مصرف‌کننده: $retail ریال"
+                    text = "🏷️ تخفیف: $discount%   |   خرید: $price\nقیمت مصرف‌کننده: $retail"
                     textSize = 13.5f
                     setTextColor(
                         when {
                             stock <= 0 -> Color.GRAY
-                            discount > 20 -> Color.parseColor("#6B21A8")
-                            discount >= 10 -> Color.parseColor("#15803D")
+                            discount >= majorThreshold -> AppSettings.safeParseColor(AppSettings.getTextColorHex(this@MainActivity, "MAJOR"), Color.parseColor("#6B21A8"))
+                            discount >= 10 -> AppSettings.safeParseColor(AppSettings.getTextColorHex(this@MainActivity, "UP"), Color.parseColor("#15803D"))
                             else -> Color.parseColor("#1D4ED8")
                         }
                     )
@@ -721,7 +731,7 @@ class MainActivity : AppCompatActivity() {
         productsAdapter.notifyDataSetChanged()
     }
 
-    // ==================== تب ۳: زمان‌بندی + رفع محدودیت باتری ====================
+    // ==================== تب ۳: زمان‌بندی ====================
     private fun createScheduleTab(): View {
         val scroll = ScrollView(this)
         val layout = LinearLayout(this).apply {
@@ -836,6 +846,495 @@ class MainActivity : AppCompatActivity() {
         scroll.addView(layout)
 
         return scroll
+    }
+
+    // ==================== تب ۴: تنظیمات کامل و شخصی‌سازی ====================
+    private fun createSettingsTab(): View {
+        val scroll = ScrollView(this)
+        settingsContentContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(20, 20, 20, 40)
+        }
+        scroll.addView(settingsContentContainer)
+        rebuildSettingsUI()
+        return scroll
+    }
+
+    private fun rebuildSettingsUI() {
+        if (!::settingsContentContainer.isInitialized) return
+        settingsContentContainer.removeAllViews()
+
+        // -------- بخش ۱: قوانین و حد نصاب هشدارها --------
+        val rulesCard = createSectionCard("🎯 قوانین و حد نصاب هشدارها")
+
+        val currentMajor = AppSettings.getMajorDiscountThreshold(this)
+        rulesCard.addView(createNumberSettingRow(
+            title = "حد نصاب «تغییر ویژه تخفیف» (نوتیفیکیشن و رنگ مجزا)",
+            currentValue = "$currentMajor درصد",
+            dialogTitle = "درصد تغییر ویژه تخفیف",
+            dialogMsg = "وقتی درصد تخفیف یک کالا حداقل چند درصد تغییر کرد، نوتیفیکیشن ویژه و رنگ متمایز داشته باشد؟ (مثلاً 15 یا 20 یا 30):",
+            initialInt = currentMajor
+        ) { newVal ->
+            AppSettings.setMajorDiscountThreshold(this, newVal)
+            rebuildSettingsUI()
+        })
+
+        val currentMinDiff = AppSettings.getMinDiscountDiff(this)
+        rulesCard.addView(createNumberSettingRow(
+            title = "حداقل تغییر درصد تخفیف برای ثبت در برنامه",
+            currentValue = "$currentMinDiff درصد",
+            dialogTitle = "حداقل درصد تغییر تخفیف",
+            dialogMsg = "تغییرات کمتر از این عدد نادیده گرفته می‌شوند (برای ثبت همه تغییرات عدد 1 را وارد کنید):",
+            initialInt = currentMinDiff
+        ) { newVal ->
+            AppSettings.setMinDiscountDiff(this, newVal)
+            rebuildSettingsUI()
+        })
+
+        rulesCard.addView(createSwitchRow(
+            title = "فقط بررسی تغییرات کالاهای موجود در انبار (نادیده گرفتن ناموجودها)",
+            checked = AppSettings.getOnlyAvailableProducts(this)
+        ) { isChecked ->
+            AppSettings.setOnlyAvailableProducts(this, isChecked)
+        })
+
+        rulesCard.addView(createSwitchRow(
+            title = "اطلاع‌رسانی هنگام شارژ مجدد کالایی که ناموجود بوده است",
+            checked = AppSettings.getTrackBackInStock(this)
+        ) { isChecked ->
+            AppSettings.setTrackBackInStock(this, isChecked)
+        })
+
+        settingsContentContainer.addView(rulesCard)
+
+        // -------- بخش ۲: شخصی‌سازی رنگ پیام‌های تغییر --------
+        val colorsCard = createSectionCard("🎨 شخصی‌سازی رنگ پیام‌های تغییر")
+
+        val colorItems = listOf(
+            Triple("MAJOR", "🔥 تغییر ویژه تخفیف (${currentMajor}٪+)", "نمونه کارت تغییر ویژه تخفیف"),
+            Triple("UP", "🟢 افزایش درصد تخفیف", "نمونه کارت افزایش درصد تخفیف"),
+            Triple("DOWN", "🔴 کاهش درصد تخفیف", "نمونه کارت کاهش درصد تخفیف"),
+            Triple("RETAIL", "🏷️ تغییر قیمت مصرف‌کننده", "نمونه کارت تغییر قیمت مصرف‌کننده"),
+            Triple("NEW", "🆕 کالای جدید / شارژ مجدد", "نمونه کارت افزوده شدن کالای جدید")
+        )
+
+        for ((key, label, sampleText) in colorItems) {
+            val bgHex = AppSettings.getBgColorHex(this, key)
+            val txtHex = AppSettings.getTextColorHex(this, key)
+
+            val itemRow = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+                gravity = Gravity.CENTER_VERTICAL
+                setBackgroundColor(AppSettings.safeParseColor(bgHex, Color.WHITE))
+                setPadding(20, 16, 20, 16)
+                val params = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { setMargins(0, 8, 0, 8) }
+                layoutParams = params
+            }
+
+            val previewTv = TextView(this).apply {
+                text = "$label\n(پیش‌نمایش رنگ پس‌زمینه و متن)"
+                textSize = 13f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(AppSettings.safeParseColor(txtHex, Color.BLACK))
+            }
+
+            val btnPick = Button(this).apply {
+                text = "🎨 تغییر رنگ"
+                textSize = 11.5f
+                setOnClickListener {
+                    showColorPickerDialog(key, label, sampleText)
+                }
+            }
+
+            itemRow.addView(previewTv, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+            itemRow.addView(btnPick)
+            colorsCard.addView(itemRow)
+        }
+
+        settingsContentContainer.addView(colorsCard)
+
+        // -------- بخش ۳: مدیریت تفکیکی نوتیفیکیشن‌ها --------
+        val notifCard = createSectionCard("🔔 مدیریت تفکیکی ارسال نوتیفیکیشن")
+
+        notifCard.addView(createSwitchRow(
+            title = "ارسال نوتیفیکیشن مجزا برای تغییرات ویژه تخفیف (${currentMajor}٪+)",
+            checked = AppSettings.isNotifMajorEnabled(this)
+        ) { AppSettings.setNotifMajorEnabled(this, it) })
+
+        notifCard.addView(createSwitchRow(
+            title = "ارسال نوتیفیکیشن برای افزایش درصد تخفیف",
+            checked = AppSettings.isNotifDiscountUpEnabled(this)
+        ) { AppSettings.setNotifDiscountUpEnabled(this, it) })
+
+        notifCard.addView(createSwitchRow(
+            title = "ارسال نوتیفیکیشن برای کاهش درصد تخفیف",
+            checked = AppSettings.isNotifDiscountDownEnabled(this)
+        ) { AppSettings.setNotifDiscountDownEnabled(this, it) })
+
+        notifCard.addView(createSwitchRow(
+            title = "ارسال نوتیفیکیشن برای تغییر قیمت مصرف‌کننده",
+            checked = AppSettings.isNotifRetailChangeEnabled(this)
+        ) { AppSettings.setNotifRetailChangeEnabled(this, it) })
+
+        notifCard.addView(createSwitchRow(
+            title = "ارسال نوتیفیکیشن برای کالاهای جدید / شارژ مجدد",
+            checked = AppSettings.isNotifNewProductEnabled(this)
+        ) { AppSettings.setNotifNewProductEnabled(this, it) })
+
+        settingsContentContainer.addView(notifCard)
+
+        // -------- بخش ۴: نمایش، واحد پول و حافظه --------
+        val displayCard = createSectionCard("💰 واحد پول، نمایش و حافظه")
+
+        displayCard.addView(createSwitchRow(
+            title = "نمایش تمام قیمت‌ها به «تومان» به جای «ریال» (حذف یک صفر)",
+            checked = AppSettings.isUseToman(this)
+        ) { isChecked ->
+            AppSettings.setUseToman(this, isChecked)
+            Toast.makeText(this, if (isChecked) "واحد پول به تومان تغییر یافت" else "واحد پول به ریال تغییر یافت", Toast.LENGTH_SHORT).show()
+        })
+
+        val maxHist = AppSettings.getMaxHistoryItems(this)
+        displayCard.addView(createNumberSettingRow(
+            title = "حداکثر تعداد نگهداری تاریخچه تغییرات",
+            currentValue = "$maxHist مورد",
+            dialogTitle = "ظرفیت تاریخچه تغییرات",
+            dialogMsg = "حداکثر چند تغییر آخر در حافظه گوشی نگهداری شود؟ (مثلاً 500 یا 1000):",
+            initialInt = maxHist
+        ) { newVal ->
+            AppSettings.setMaxHistoryItems(this, newVal)
+            rebuildSettingsUI()
+        })
+
+        val maxLines = AppSettings.getMaxNotifLines(this)
+        displayCard.addView(createNumberSettingRow(
+            title = "حداکثر تعداد کالاهای نمایش داده شده در هر نوتیفیکیشن",
+            currentValue = "$maxLines خط",
+            dialogTitle = "تعداد خطوط نوتیفیکیشن",
+            dialogMsg = "در هر نوتیفیکیشن حداکثر چند کالای تغییر یافته فهرست شود؟ (مثلاً 10 یا 15):",
+            initialInt = maxLines
+        ) { newVal ->
+            AppSettings.setMaxNotifLines(this, newVal)
+            rebuildSettingsUI()
+        })
+
+        settingsContentContainer.addView(displayCard)
+
+        // -------- بخش ۵: موقعیت مکانی و تنظیمات پیشرفته سرور --------
+        val serverCard = createSectionCard("🌍 موقعیت مکانی و تنظیمات پیشرفته")
+
+        val currentLat = AppSettings.getLatitude(this)
+        val currentLng = AppSettings.getLongitude(this)
+        val locRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 12, 0, 12)
+        }
+        val locTv = TextView(this).apply {
+            text = "مختصات فروشگاه:\nLat: $currentLat | Lng: $currentLng"
+            textSize = 12.5f
+            setTextColor(Color.DKGRAY)
+        }
+        val btnEditLoc = Button(this).apply {
+            text = "✏️ ویرایش مختصات"
+            textSize = 11.5f
+            setOnClickListener { showLocationDialog() }
+        }
+        locRow.addView(locTv, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        locRow.addView(btnEditLoc)
+        serverCard.addView(locRow)
+
+        val maxCat = AppSettings.getMaxCategoryScan(this)
+        serverCard.addView(createNumberSettingRow(
+            title = "حداکثر شماره دسته‌بندی برای اسکن کامل سایت",
+            currentValue = "$maxCat دسته‌بندی",
+            dialogTitle = "تعداد دسته‌بندی‌های اسکن",
+            dialogMsg = "پیش‌فرض 60 است. اگر دسته‌بندی‌های جدیدی به سایت اضافه شد می‌توانید آن را افزایش دهید:",
+            initialInt = maxCat
+        ) { newVal ->
+            AppSettings.setMaxCategoryScan(this, newVal)
+            rebuildSettingsUI()
+        })
+
+        val btnClearSnapshot = Button(this).apply {
+            text = "🧹 پاکسازی حافظه پایه کالاها (شروع اسکن از صفر)"
+            setBackgroundColor(Color.parseColor("#475569"))
+            setTextColor(Color.WHITE)
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 20, 0, 10) }
+            layoutParams = params
+            setOnClickListener {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("پاکسازی حافظه پایه کالاها")
+                    .setMessage("آیا مطمئن هستید؟ با این کار در بروزرسانی بعدی، لیست کالاها از نو به عنوان پایه ذخیره می‌شود.")
+                    .setPositiveButton("بله، پاک شود") { _, _ ->
+                        DiscountEngine.clearProductsSnapshot(this@MainActivity)
+                        Toast.makeText(this@MainActivity, "حافظه پایه کالاها پاک شد", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("انصراف", null)
+                    .show()
+            }
+        }
+
+        val btnResetDefaults = Button(this).apply {
+            text = "♻️ بازگردانی تمام تنظیمات و رنگ‌ها به حالت پیش‌فرض"
+            setBackgroundColor(Color.parseColor("#DC2626"))
+            setTextColor(Color.WHITE)
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 8, 0, 8) }
+            layoutParams = params
+            setOnClickListener {
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle("بازگشت به تنظیمات پیش‌فرض")
+                    .setMessage("آیا تمام رنگ‌ها و تنظیمات به حالت اولیه برگردند؟ (لاگین و تاریخچه شما پاک نمی‌شود)")
+                    .setPositiveButton("بله، بازگردانی شود") { _, _ ->
+                        AppSettings.resetAllToDefaults(this@MainActivity)
+                        rebuildSettingsUI()
+                        Toast.makeText(this@MainActivity, "تنظیمات به حالت پیش‌فرض بازگشت", Toast.LENGTH_SHORT).show()
+                    }
+                    .setNegativeButton("انصراف", null)
+                    .show()
+            }
+        }
+
+        serverCard.addView(btnClearSnapshot)
+        serverCard.addView(btnResetDefaults)
+        settingsContentContainer.addView(serverCard)
+    }
+
+    private fun createSectionCard(title: String): LinearLayout {
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.WHITE)
+            setPadding(24, 20, 24, 20)
+            val params = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 0, 0, 20) }
+            layoutParams = params
+
+            val headerTv = TextView(this@MainActivity).apply {
+                text = title
+                textSize = 15.5f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.parseColor("#1E293B"))
+                setPadding(0, 0, 0, 14)
+            }
+            addView(headerTv)
+        }
+    }
+
+    private fun createSwitchRow(title: String, checked: Boolean, onChanged: (Boolean) -> Unit): View {
+        return Switch(this).apply {
+            text = title
+            textSize = 13.5f
+            isChecked = checked
+            setPadding(0, 14, 0, 14)
+            setOnCheckedChangeListener { _, isChecked -> onChanged(isChecked) }
+        }
+    }
+
+    private fun createNumberSettingRow(
+        title: String,
+        currentValue: String,
+        dialogTitle: String,
+        dialogMsg: String,
+        initialInt: Int,
+        onSaved: (Int) -> Unit
+    ): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 10, 0, 10)
+        }
+        val tv = TextView(this).apply {
+            text = "$title:\nفعلی: $currentValue"
+            textSize = 13.5f
+            setTextColor(Color.parseColor("#334155"))
+        }
+        val btn = Button(this).apply {
+            text = "✏️ تغییر"
+            textSize = 12f
+            setOnClickListener {
+                val input = EditText(this@MainActivity).apply {
+                    inputType = InputType.TYPE_CLASS_NUMBER
+                    setText(initialInt.toString())
+                    gravity = Gravity.CENTER
+                }
+                AlertDialog.Builder(this@MainActivity)
+                    .setTitle(dialogTitle)
+                    .setMessage(dialogMsg)
+                    .setView(input)
+                    .setPositiveButton("ذخیره") { _, _ ->
+                        val v = input.text.toString().toIntOrNull() ?: initialInt
+                        onSaved(v)
+                    }
+                    .setNegativeButton("انصراف", null)
+                    .show()
+            }
+        }
+        row.addView(tv, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(btn)
+        return row
+    }
+
+    // پنجره انتخاب رنگ (شامل ۱۰ تم آماده + ورود کد رنگ دلخواه و پیش‌نمایش زنده)
+    private fun showColorPickerDialog(key: String, label: String, sampleText: String) {
+        val scroll = ScrollView(this)
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(24, 20, 24, 20)
+        }
+
+        var selectedBg = AppSettings.getBgColorHex(this, key)
+        var selectedTxt = AppSettings.getTextColorHex(this, key)
+
+        val previewBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(AppSettings.safeParseColor(selectedBg, Color.WHITE))
+            setPadding(24, 20, 24, 20)
+        }
+        val previewTitle = TextView(this).apply {
+            text = sampleText
+            textSize = 14.5f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.BLACK)
+        }
+        val previewDetail = TextView(this).apply {
+            text = "$label | تخفیف: از 10% به 35%"
+            textSize = 13.5f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(AppSettings.safeParseColor(selectedTxt, Color.DKGRAY))
+            setPadding(0, 8, 0, 0)
+        }
+        previewBox.addView(previewTitle)
+        previewBox.addView(previewDetail)
+
+        val bgInput = EditText(this).apply {
+            setText(selectedBg)
+            hint = "کد رنگ پس‌زمینه (مثلاً #F3E8FF)"
+            setSingleLine(true)
+        }
+        val txtInput = EditText(this).apply {
+            setText(selectedTxt)
+            hint = "کد رنگ متن (مثلاً #6B21A8)"
+            setSingleLine(true)
+        }
+
+        fun updateLivePreview(bg: String, txt: String) {
+            previewBox.setBackgroundColor(AppSettings.safeParseColor(bg, Color.WHITE))
+            previewDetail.setTextColor(AppSettings.safeParseColor(txt, Color.BLACK))
+        }
+
+        val presets = listOf(
+            Triple("🟣 بنفش ویژه (پیش‌فرض تخفیف بالا)", "#F3E8FF", "#6B21A8"),
+            Triple("🟢 سبز زمردی (پیش‌فرض افزایش تخفیف)", "#F0FDF4", "#15803D"),
+            Triple("🔴 قرمز یاقوتی (پیش‌فرض کاهش تخفیف)", "#FEF2F2", "#B91C1C"),
+            Triple("🟠 نارنجی کهربایی (پیش‌فرض قیمت مصرف‌کننده)", "#FFF7ED", "#C2410C"),
+            Triple("🔵 آبی اقیانوسی (پیش‌فرض کالای جدید)", "#EFF6FF", "#1D4ED8"),
+            Triple("🟡 طلایی / زرد روشن", "#FEFCE8", "#A16207"),
+            Triple("🌸 صورتی / سرخابی", "#FDF2F8", "#BE185D"),
+            Triple("💎 فیروزه‌ای شاد", "#ECFEFF", "#0E7490"),
+            Triple("🌑 مشکی / تیره مدرن", "#1E293B", "#38BDF8"),
+            Triple("⚪ سفید ساده با متن سرمه‌ای", "#FFFFFF", "#0F172A")
+        )
+
+        val presetTitle = TextView(this).apply {
+            text = "۱. انتخاب سریع از رنگ‌های آماده:"
+            setTypeface(null, Typeface.BOLD)
+            setPadding(0, 20, 0, 10)
+        }
+
+        container.addView(previewBox)
+        container.addView(presetTitle)
+
+        for ((name, pBg, pTxt) in presets) {
+            val btn = Button(this).apply {
+                text = name
+                textSize = 12.5f
+                setBackgroundColor(AppSettings.safeParseColor(pBg, Color.WHITE))
+                setTextColor(AppSettings.safeParseColor(pTxt, Color.BLACK))
+                val params = LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    LinearLayout.LayoutParams.WRAP_CONTENT
+                ).apply { setMargins(0, 6, 0, 6) }
+                layoutParams = params
+                setOnClickListener {
+                    selectedBg = pBg
+                    selectedTxt = pTxt
+                    bgInput.setText(pBg)
+                    txtInput.setText(pTxt)
+                    updateLivePreview(pBg, pTxt)
+                }
+            }
+            container.addView(btn)
+        }
+
+        val manualTitle = TextView(this).apply {
+            text = "۲. یا وارد کردن دستی کد رنگ (HEX):"
+            setTypeface(null, Typeface.BOLD)
+            setPadding(0, 24, 0, 8)
+        }
+        container.addView(manualTitle)
+        container.addView(bgInput)
+        container.addView(txtInput)
+
+        scroll.addView(container)
+
+        AlertDialog.Builder(this)
+            .setTitle("تنظیم رنگ: $label")
+            .setView(scroll)
+            .setPositiveButton("ذخیره رنگ") { _, _ ->
+                val finalBg = bgInput.text.toString().trim().ifEmpty { selectedBg }
+                val finalTxt = txtInput.text.toString().trim().ifEmpty { selectedTxt }
+                AppSettings.setCustomColors(this, key, finalBg, finalTxt)
+                rebuildSettingsUI()
+                Toast.makeText(this, "رنگ جدید ذخیره شد", Toast.LENGTH_SHORT).show()
+            }
+            .setNegativeButton("انصراف", null)
+            .show()
+    }
+
+    private fun showLocationDialog() {
+        val layout = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 20, 32, 10)
+        }
+        val latEdit = EditText(this).apply {
+            setText(AppSettings.getLatitude(this@MainActivity))
+            hint = "Latitude (عرض جغرافیایی)"
+            setSingleLine(true)
+        }
+        val lngEdit = EditText(this).apply {
+            setText(AppSettings.getLongitude(this@MainActivity))
+            hint = "Longitude (طول جغرافیایی)"
+            setSingleLine(true)
+        }
+        layout.addView(latEdit)
+        layout.addView(lngEdit)
+
+        AlertDialog.Builder(this)
+            .setTitle("ویرایش مختصات فروشگاه")
+            .setView(layout)
+            .setPositiveButton("ذخیره") { _, _ ->
+                val newLat = latEdit.text.toString().trim()
+                val newLng = lngEdit.text.toString().trim()
+                if (newLat.isNotEmpty() && newLng.isNotEmpty()) {
+                    AppSettings.setLatitude(this, newLat)
+                    AppSettings.setLongitude(this, newLng)
+                    rebuildSettingsUI()
+                    Toast.makeText(this, "مختصات جدید ذخیره شد", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("انصراف", null)
+            .show()
     }
 
     private fun updateBatteryButtonState() {
@@ -975,7 +1474,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ==================== تب ۴: ورود به حساب کاربری ====================
+    // ==================== تب ۵: ورود به حساب کاربری ====================
     private fun createLoginTab(): View {
         val layout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
 
@@ -1012,10 +1511,10 @@ class MainActivity : AppCompatActivity() {
     private fun createTabButton(title: String, onClick: () -> Unit): Button {
         return Button(this).apply {
             text = title
-            textSize = 11.5f
+            textSize = 10.5f
             setTextColor(Color.WHITE)
             setBackgroundColor(Color.parseColor("#334155"))
-            setPadding(4, 12, 4, 12)
+            setPadding(2, 10, 2, 10)
             setOnClickListener { onClick() }
         }
     }
