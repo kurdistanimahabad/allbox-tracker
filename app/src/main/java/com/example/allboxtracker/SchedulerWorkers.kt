@@ -29,13 +29,15 @@ class ExactTimeReceiver : BroadcastReceiver() {
         val alarmType = intent.getStringExtra("ALARM_TYPE") ?: "DAILY"
         val prefs = context.getSharedPreferences("AllBoxPrefs", Context.MODE_PRIVATE)
 
-        // ۱. تنظیم مجدد آلارم بعدی بلافاصله
+        // ۱. اگر آلارم مربوط به تایمر دوره‌ای است، فقط تایمر دوره‌ای بعدی را تنظیم کن
         if (alarmType == "INTERVAL") {
             if (prefs.getBoolean("AUTO_CHECK_ENABLED", true)) {
                 val intervalMin = prefs.getInt("AUTO_INTERVAL_MINUTES", 30)
-                AlarmHelper.scheduleIntervalAlarm(context, intervalMin)
+                AlarmHelper.scheduleIntervalAlarm(context, intervalMin, forceReset = true)
             }
-        } else {
+        }
+        // ۲. اگر آلارم مربوط به ساعت‌های جداگانه روزانه است، کاملاً مستقل از تایمر دوره‌ای اجرا شو و برای فردا تنظیم کن
+        else if (alarmType == "DAILY") {
             val hour = intent.getIntExtra("HOUR", -1)
             val minute = intent.getIntExtra("MINUTE", -1)
             if (hour != -1 && minute != -1) {
@@ -43,14 +45,14 @@ class ExactTimeReceiver : BroadcastReceiver() {
             }
         }
 
-        // ۲. اجرای مستقیم و فوری بررسی قیمت‌ها بدون معطل ماندن در صف WorkManager
+        // اجرای فوری بررسی قیمت‌ها (حتی اگر کمتر از زمان تایمر دوره‌ای از آخرین بررسی گذشته باشد)
         val pendingResult = goAsync()
         val powerManager = context.getSystemService(Context.POWER_SERVICE) as PowerManager
         val wakeLock = powerManager.newWakeLock(
             PowerManager.PARTIAL_WAKE_LOCK,
             "AllBoxTracker::BgCheckWakeLock"
         )
-        wakeLock.acquire(3 * 60 * 1000L) // بیدار نگه داشتن پردازنده حداکثر تا ۳ دقیقه
+        wakeLock.acquire(3 * 60 * 1000L)
 
         CoroutineScope(Dispatchers.IO).launch {
             try {
@@ -65,7 +67,6 @@ class ExactTimeReceiver : BroadcastReceiver() {
     }
 }
 
-// راه‌اندازی مجدد تمام تایمرها پس از خاموش و روشن شدن گوشی
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
@@ -80,7 +81,8 @@ object AlarmHelper {
         val prefs = context.getSharedPreferences("AllBoxPrefs", Context.MODE_PRIVATE)
         val enabled = prefs.getBoolean("AUTO_CHECK_ENABLED", true)
         val intervalMin = prefs.getInt("AUTO_INTERVAL_MINUTES", 30)
-        updatePeriodicSchedule(context, enabled, intervalMin)
+        // عدم ریست کردن تایمر در صورت باز شدن معمولی برنامه
+        updatePeriodicSchedule(context, enabled, intervalMin, forceReset = false)
 
         val savedTimes = prefs.getStringSet("CUSTOM_TIMES", emptySet()) ?: emptySet()
         for (timeStr in savedTimes) {
@@ -93,8 +95,8 @@ object AlarmHelper {
         }
     }
 
-    fun updatePeriodicSchedule(context: Context, enabled: Boolean, intervalMinutes: Int) {
-        val safeMinutes = maxOf(5, intervalMinutes)
+    fun updatePeriodicSchedule(context: Context, enabled: Boolean, intervalMinutes: Int, forceReset: Boolean = true) {
+        val safeMinutes = maxOf(1, intervalMinutes)
         if (!enabled) {
             WorkManager.getInstance(context).cancelUniqueWork("AllBoxDiscountTracker")
             cancelIntervalAlarm(context)
@@ -105,29 +107,46 @@ object AlarmHelper {
         val work = PeriodicWorkRequestBuilder<DiscountWorker>(wmMinutes, TimeUnit.MINUTES).build()
         WorkManager.getInstance(context).enqueueUniquePeriodicWork(
             "AllBoxDiscountTracker",
-            ExistingPeriodicWorkPolicy.UPDATE,
+            if (forceReset) ExistingPeriodicWorkPolicy.UPDATE else ExistingPeriodicWorkPolicy.KEEP,
             work
         )
 
-        scheduleIntervalAlarm(context, safeMinutes)
+        scheduleIntervalAlarm(context, safeMinutes, forceReset = forceReset)
     }
 
-    fun scheduleIntervalAlarm(context: Context, intervalMinutes: Int) {
+    fun scheduleIntervalAlarm(context: Context, intervalMinutes: Int, forceReset: Boolean = true) {
+        val prefs = context.getSharedPreferences("AllBoxPrefs", Context.MODE_PRIVATE)
+        val now = System.currentTimeMillis()
+        val savedNextTrigger = prefs.getLong("NEXT_INTERVAL_TRIGGER_MS", 0L)
+
+        val triggerAt = if (!forceReset && savedNextTrigger > now + 5000L) {
+            savedNextTrigger
+        } else {
+            val next = now + (intervalMinutes * 60 * 1000L)
+            prefs.edit().putLong("NEXT_INTERVAL_TRIGGER_MS", next).apply()
+            next
+        }
+
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
         val intent = Intent(context, ExactTimeReceiver::class.java).apply {
+            action = "com.example.allboxtracker.ACTION_INTERVAL_ALARM"
             putExtra("ALARM_TYPE", "INTERVAL")
         }
         val pendingIntent = PendingIntent.getBroadcast(
             context, 99999, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val triggerAt = System.currentTimeMillis() + (intervalMinutes * 60 * 1000L)
         setHighPriorityAlarm(context, alarmManager, triggerAt, pendingIntent)
     }
 
     private fun cancelIntervalAlarm(context: Context) {
+        val prefs = context.getSharedPreferences("AllBoxPrefs", Context.MODE_PRIVATE)
+        prefs.edit().remove("NEXT_INTERVAL_TRIGGER_MS").apply()
+
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val intent = Intent(context, ExactTimeReceiver::class.java)
+        val intent = Intent(context, ExactTimeReceiver::class.java).apply {
+            action = "com.example.allboxtracker.ACTION_INTERVAL_ALARM"
+        }
         val pendingIntent = PendingIntent.getBroadcast(
             context, 99999, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
@@ -135,14 +154,16 @@ object AlarmHelper {
         alarmManager.cancel(pendingIntent)
     }
 
+    // تنظیم ساعت‌های روزانه با شناسه کاملاً مستقل تا حتی در فواصل کمتر از تایمر اصلی هم اجرا شوند
     fun scheduleDailyAlarm(context: Context, hour: Int, minute: Int) {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val requestCode = 10000 + (hour * 100) + minute
         val intent = Intent(context, ExactTimeReceiver::class.java).apply {
+            action = "com.example.allboxtracker.ACTION_DAILY_ALARM_$requestCode"
             putExtra("ALARM_TYPE", "DAILY")
             putExtra("HOUR", hour)
             putExtra("MINUTE", minute)
         }
-        val requestCode = hour * 100 + minute
         val pendingIntent = PendingIntent.getBroadcast(
             context, requestCode, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
@@ -163,8 +184,10 @@ object AlarmHelper {
 
     fun cancelDailyAlarm(context: Context, hour: Int, minute: Int) {
         val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val intent = Intent(context, ExactTimeReceiver::class.java)
-        val requestCode = hour * 100 + minute
+        val requestCode = 10000 + (hour * 100) + minute
+        val intent = Intent(context, ExactTimeReceiver::class.java).apply {
+            action = "com.example.allboxtracker.ACTION_DAILY_ALARM_$requestCode"
+        }
         val pendingIntent = PendingIntent.getBroadcast(
             context, requestCode, intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
@@ -172,7 +195,6 @@ object AlarmHelper {
         alarmManager.cancel(pendingIntent)
     }
 
-    // استفاده از AlarmClock برای جلوگیری ۱۰۰٪ از توقف تایمر در حالت استندبای و Doze اندروید
     private fun setHighPriorityAlarm(
         context: Context,
         alarmManager: AlarmManager,
