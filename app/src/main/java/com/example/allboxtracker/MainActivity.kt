@@ -31,6 +31,7 @@ import kotlinx.coroutines.launch
 import org.json.JSONObject
 import java.text.NumberFormat
 import java.util.Locale
+import kotlin.math.abs
 
 class MainActivity : AppCompatActivity() {
 
@@ -138,7 +139,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ==================== تب ۱: لیست تغییرات (با جستجو + نمایش قیمت مصرف‌کننده) ====================
+    // ==================== تب ۱: لیست تغییرات (با فیلترهای جدید و رنگ ویژه برای بالای ۲۰٪) ====================
     private fun createHistoryTab(): View {
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -193,7 +194,14 @@ class MainActivity : AppCompatActivity() {
 
         historyTypeSpinner = Spinner(this).apply {
             setBackgroundColor(Color.WHITE)
-            val types = listOf("همه تغییرات", "🟢 افزایش تخفیف", "🔴 کاهش تخفیف", "🆕 کالای جدید")
+            val types = listOf(
+                "همه تغییرات",
+                "🟢 افزایش درصد تخفیف",
+                "🔴 کاهش درصد تخفیف",
+                "🏷️ تغییر قیمت مصرف‌کننده",
+                "🔥 تغییر تخفیف بالای ۲۰٪",
+                "🆕 کالای جدید"
+            )
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, types)
             onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
                 override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
@@ -203,10 +211,10 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        searchRow.addView(historySearchEditText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.2f).apply {
+        searchRow.addView(historySearchEditText, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1.1f).apply {
             setMargins(0, 0, 8, 0)
         })
-        searchRow.addView(historyTypeSpinner, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.8f))
+        searchRow.addView(historyTypeSpinner, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.9f))
 
         val topInfoRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -248,11 +256,17 @@ class MainActivity : AppCompatActivity() {
                 val item = getItem(position)
                 val recordType = item.optString("type", "CHANGE")
                 val isBetter = item.optBoolean("isBetter", true)
+                val oldD = item.optInt("oldDiscount", 0)
+                val newD = item.optInt("newDiscount", 0)
+                val isMajor = item.optBoolean("isMajorChange", abs(newD - oldD) > 20 && recordType != "RETAIL_PRICE_UP" && recordType != "RETAIL_PRICE_DOWN")
 
-                val bgColor = when (recordType) {
-                    "NEW_PRODUCT" -> "#EFF6FF"
-                    "DISCOUNT_DOWN" -> "#FEF2F2"
-                    else -> if (isBetter) "#F0FDF4" else "#FEF2F2"
+                // تعیین رنگ پس‌زمینه متمایز برای هر نوع تغییر (بنفش ویژه برای تغییرات بالای ۲۰ درصد)
+                val bgColor = when {
+                    isMajor && (recordType == "DISCOUNT_UP" || recordType == "DISCOUNT_DOWN" || recordType == "CHANGE") -> "#F3E8FF"
+                    recordType == "RETAIL_PRICE_UP" || recordType == "RETAIL_PRICE_DOWN" -> "#FFF7ED"
+                    recordType == "NEW_PRODUCT" -> "#EFF6FF"
+                    recordType == "DISCOUNT_DOWN" || (!isBetter && recordType == "CHANGE") -> "#FEF2F2"
+                    else -> "#F0FDF4"
                 }
                 card.setBackgroundColor(Color.parseColor(bgColor))
 
@@ -265,8 +279,6 @@ class MainActivity : AppCompatActivity() {
                     setTextColor(Color.BLACK)
                 }
 
-                val oldD = item.optInt("oldDiscount", 0)
-                val newD = item.optInt("newDiscount", 0)
                 val oldBuy = numFormat.format(item.optLong("oldPrice", 0L))
                 val newBuy = numFormat.format(item.optLong("newPrice", 0L))
 
@@ -284,19 +296,33 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 val detailView = TextView(this@MainActivity).apply {
-                    when (recordType) {
-                        "NEW_PRODUCT" -> {
+                    when {
+                        recordType == "NEW_PRODUCT" -> {
                             text = "🆕 محصول جدید!  |  تخفیف: $newD%\nقیمت خرید: $newBuy ریال\n$retailLine"
                             setTextColor(Color.parseColor("#1D4ED8"))
                         }
-                        "DISCOUNT_DOWN" -> {
-                            text = "🔴 کاهش تخفیف: از $oldD% به $newD%\nقیمت خرید: از $oldBuy به $newBuy ریال\n$retailLine"
+                        recordType == "RETAIL_PRICE_UP" -> {
+                            text = "📈 افزایش قیمت مصرف‌کننده: از $oldRetail به $newRetail ریال\nقیمت خرید: از $oldBuy به $newBuy ریال (تخفیف فعلی: $newD%)"
+                            setTextColor(Color.parseColor("#C2410C"))
+                        }
+                        recordType == "RETAIL_PRICE_DOWN" -> {
+                            text = "📉 کاهش قیمت مصرف‌کننده: از $oldRetail به $newRetail ریال\nقیمت خرید: از $oldBuy به $newBuy ریال (تخفیف فعلی: $newD%)"
+                            setTextColor(Color.parseColor("#B45309"))
+                        }
+                        isMajor -> {
+                            val diff = abs(newD - oldD)
+                            val majorLabel = if (isBetter) "🔥 افزایش ویژه تخفیف (+$diff%):" else "⚠️ کاهش شدید تخفیف (-$diff%):"
+                            text = "$majorLabel از $oldD% به $newD%\nقیمت خرید: از $oldBuy به $newBuy ریال\n$retailLine"
+                            setTextColor(Color.parseColor("#6B21A8"))
+                            setTypeface(null, Typeface.BOLD)
+                        }
+                        recordType == "DISCOUNT_DOWN" || !isBetter -> {
+                            text = "🔴 کاهش درصد تخفیف: از $oldD% به $newD%\nقیمت خرید: از $oldBuy به $newBuy ریال\n$retailLine"
                             setTextColor(Color.parseColor("#B91C1C"))
                         }
                         else -> {
-                            val label = if (isBetter) "🟢 افزایش تخفیف:" else "🔴 کاهش تخفیف:"
-                            text = "$label از $oldD% به $newD%\nقیمت خرید: از $oldBuy به $newBuy ریال\n$retailLine"
-                            setTextColor(if (isBetter) Color.parseColor("#15803D") else Color.parseColor("#B91C1C"))
+                            text = "🟢 افزایش درصد تخفیف: از $oldD% به $newD%\nقیمت خرید: از $oldBuy به $newBuy ریال\n$retailLine"
+                            setTextColor(Color.parseColor("#15803D"))
                         }
                     }
                     textSize = 13.5f
@@ -351,10 +377,21 @@ class MainActivity : AppCompatActivity() {
 
             val recType = item.optString("type", "CHANGE")
             val isBetter = item.optBoolean("isBetter", true)
+            val oldD = item.optInt("oldDiscount", 0)
+            val newD = item.optInt("newDiscount", 0)
+            val isMajor = item.optBoolean("isMajorChange", abs(newD - oldD) > 20 && recType != "RETAIL_PRICE_UP" && recType != "RETAIL_PRICE_DOWN")
+
             val matchType = when (typeFilter) {
+                // ۱: افزایش درصد تخفیف
                 1 -> recType == "DISCOUNT_UP" || (recType == "CHANGE" && isBetter)
+                // ۲: کاهش درصد تخفیف
                 2 -> recType == "DISCOUNT_DOWN" || (recType == "CHANGE" && !isBetter)
-                3 -> recType == "NEW_PRODUCT"
+                // ۳: تغییر قیمت مصرف‌کننده
+                3 -> recType == "RETAIL_PRICE_UP" || recType == "RETAIL_PRICE_DOWN"
+                // ۴: تغییر تخفیف بالای ۲۰٪
+                4 -> isMajor
+                // ۵: کالای جدید
+                5 -> recType == "NEW_PRODUCT"
                 else -> true
             }
             matchQuery && matchType
@@ -373,7 +410,6 @@ class MainActivity : AppCompatActivity() {
 
         val prefs = getSharedPreferences("AllBoxPrefs", MODE_PRIVATE)
 
-        // ردیف ۱: جستجو + مرتب‌سازی
         val topSearchSortRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, 0, 0, 8)
@@ -418,7 +454,6 @@ class MainActivity : AppCompatActivity() {
         })
         topSearchSortRow.addView(sortSpinner, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 0.85f))
 
-        // ردیف ۲: انتخاب دسته‌بندی اصلی و زیردسته
         val categoryRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             setPadding(0, 4, 0, 6)
@@ -454,7 +489,6 @@ class MainActivity : AppCompatActivity() {
         })
         categoryRow.addView(subCategorySpinner, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
 
-        // گزینه فیلتر نمایش فقط محصولات موجود
         inStockCheckBox = CheckBox(this).apply {
             text = "✅ فقط نمایش کالاهای موجود در انبار (حذف ناموجودها)"
             textSize = 13f
@@ -526,6 +560,7 @@ class MainActivity : AppCompatActivity() {
                     setTextColor(
                         when {
                             stock <= 0 -> Color.GRAY
+                            discount > 20 -> Color.parseColor("#6B21A8")
                             discount >= 10 -> Color.parseColor("#15803D")
                             else -> Color.parseColor("#1D4ED8")
                         }
@@ -696,7 +731,6 @@ class MainActivity : AppCompatActivity() {
 
         val prefs = getSharedPreferences("AllBoxPrefs", MODE_PRIVATE)
 
-        // دکمه رفع محدودیت باتری برای تضمین اجرای خودکار در پس‌زمینه
         batteryStatusBtn = Button(this).apply {
             textSize = 13.5f
             setTypeface(null, Typeface.BOLD)
@@ -736,7 +770,7 @@ class MainActivity : AppCompatActivity() {
             setOnCheckedChangeListener { _, isChecked ->
                 val currentMin = prefs.getInt("AUTO_INTERVAL_MINUTES", 30)
                 prefs.edit().putBoolean("AUTO_CHECK_ENABLED", isChecked).apply()
-                AlarmHelper.updatePeriodicSchedule(this@MainActivity, isChecked, currentMin)
+                AlarmHelper.updatePeriodicSchedule(this@MainActivity, isChecked, currentMin, forceReset = true)
                 Toast.makeText(
                     context,
                     if (isChecked) "بررسی خودکار هر $currentMin دقیقه فعال شد" else "بررسی خودکار متوقف شد",
@@ -779,14 +813,14 @@ class MainActivity : AppCompatActivity() {
 
                     AlarmHelper.scheduleDailyAlarm(this@MainActivity, hour, minute)
                     refreshAlarmsListUI()
-                    Toast.makeText(context, "ساعت $timeStr اضافه شد", Toast.LENGTH_SHORT).show()
+                    Toast.makeText(context, "ساعت $timeStr اضافه شد (مستقل از تایمر دوره‌ای اجرا می‌شود)", Toast.LENGTH_SHORT).show()
                 }, 12, 0, true).show()
             }
         }
 
         val titleAlarms = TextView(this).apply {
-            text = "ساعت‌های مشخص روزانه (برای تغییر روی ✏️ ویرایش بزنید):"
-            textSize = 14f
+            text = "ساعت‌های مشخص روزانه (مستقل از تایمر دوره‌ای - برای تغییر روی ✏️ ویرایش بزنید):"
+            textSize = 13.5f
             setTypeface(null, Typeface.BOLD)
             setPadding(0, 16, 0, 12)
         }
@@ -842,22 +876,22 @@ class MainActivity : AppCompatActivity() {
         val input = EditText(this).apply {
             inputType = InputType.TYPE_CLASS_NUMBER
             setText(currentMin.toString())
-            hint = "مثلاً 15 یا 30 یا 60"
+            hint = "مثلاً 10 یا 15 یا 30"
             gravity = Gravity.CENTER
         }
 
         AlertDialog.Builder(this)
             .setTitle("تنظیم فاصله بررسی خودکار")
-            .setMessage("هر چند دقیقه یک‌بار لیست تخفیف‌ها به صورت خودکار بررسی شود؟ (مثلاً 15، 30، 45 یا 60 دقیقه):")
+            .setMessage("هر چند دقیقه یک‌بار لیست تخفیف‌ها به صورت خودکار بررسی شود؟")
             .setView(input)
             .setPositiveButton("ذخیره") { _, _ ->
                 val entered = input.text.toString().toIntOrNull() ?: 30
-                val validMinutes = maxOf(5, entered)
+                val validMinutes = maxOf(1, entered)
                 prefs.edit().putInt("AUTO_INTERVAL_MINUTES", validMinutes).apply()
                 intervalInfoTextView.text = "⏱️ فاصله زمانی بررسی خودکار فعلی: هر $validMinutes دقیقه یک‌بار"
 
                 val enabled = prefs.getBoolean("AUTO_CHECK_ENABLED", true)
-                AlarmHelper.updatePeriodicSchedule(this, enabled, validMinutes)
+                AlarmHelper.updatePeriodicSchedule(this, enabled, validMinutes, forceReset = true)
                 Toast.makeText(this, "بررسی خودکار روی هر $validMinutes دقیقه تنظیم شد", Toast.LENGTH_SHORT).show()
             }
             .setNegativeButton("انصراف", null)
